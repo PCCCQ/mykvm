@@ -712,15 +712,17 @@ pub fn input_runtime_status(
         receive_only_status()
     } else if targets.is_empty() {
         no_target_status(layout)
-    } else if cfg!(any(target_os = "macos", target_os = "windows")) {
-        NativeStageStatus {
-            state: "ready".into(),
-            detail: format!(
-                "控制端已就绪，{} 条远端贴边可用于鼠标和键盘切换。",
-                targets.len()
-            ),
-        }
     } else {
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        {
+            NativeStageStatus {
+                state: "ready".into(),
+                detail: format!(
+                    "控制端已就绪，{} 条远端贴边可用于鼠标和键盘切换。",
+                    targets.len()
+                ),
+            }
+        }
         #[cfg(target_os = "linux")]
         {
             match crate::linux_input::probe() {
@@ -1101,6 +1103,7 @@ fn start_platform_capture(
     thread::spawn(move || {
         refresh_windows_input_desktop_cache();
         let context = Arc::new(WindowsCaptureContext {
+            targets,
             quic_transport,
             layout_state,
             native_layout,
