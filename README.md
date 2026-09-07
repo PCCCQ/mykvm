@@ -2,27 +2,27 @@
 
 **One keyboard, one mouse, one clipboard — shared across your Mac, Windows, and Linux machines on the same LAN.**
 
-Move your cursor off the edge of one screen and it lands on the next machine. Your keyboard follows, and the clipboard (text and images) syncs automatically. No KVM hardware, no cables.
+Move your cursor off the edge of one screen and it lands on the next machine. Your keyboard follows, and the clipboard (text and images) syncs automatically. No KVM hardware, no cables — a software KVM built on Rust and Tauri.
 
-[![Download](https://img.shields.io/github/v/release/XxMinor/mykvm?label=Download&style=for-the-badge)](https://github.com/XxMinor/mykvm/releases/latest)
-[![Stars](https://img.shields.io/github/stars/XxMinor/mykvm?label=Stars&logo=github&style=for-the-badge)](https://github.com/XxMinor/mykvm/stargazers)
-[![Forks](https://img.shields.io/github/forks/XxMinor/mykvm?label=Forks&logo=github&style=for-the-badge)](https://github.com/XxMinor/mykvm/forks)
-[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-2786ff?style=for-the-badge)](https://github.com/XxMinor/mykvm/releases/latest)
+[![Download](https://img.shields.io/github/v/release/PCCCQ/mykvm?label=Download&style=for-the-badge)](https://github.com/PCCCQ/mykvm/releases/latest)
+[![Platforms](https://img.shields.io/badge/platforms-macOS%20%7C%20Windows%20%7C%20Linux-2786ff?style=for-the-badge)](https://github.com/PCCCQ/mykvm/releases/latest)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green?style=for-the-badge)](./LICENSE)
 
 [中文说明](./README.zh-CN.md)
 
-![MyKVM tour](docs/screenshots/tour.gif)
+## Why MyKVM
 
-## Screenshots
-
-| Display layout | Devices | Settings |
-| --- | --- | --- |
-| ![Layout](docs/screenshots/layout.png) | ![Devices](docs/screenshots/devices.png) | ![Settings](docs/screenshots/settings.png) |
+- **True cross-platform control.** macOS, Windows, and Linux machines share one keyboard and mouse, in both directions.
+- **Full Linux support.** Linux machines are no longer limited to clipboard-only: they can control other machines (X11 pointer/keyboard capture with the same edge-snap, screen-roam and hotkey-switch behaviour as Windows/macOS) and be controlled by them (XTEST input injection).
+- **Multi-monitor roaming.** Arrangement-aware layout editing; the cursor roams across a remote machine's extra displays, not just its primary one.
+- **Encrypted transport.** Input and clipboard ride a TLS 1.3 (QUIC) connection pinned to the peer's advertised certificate — traffic never crosses the network in plaintext.
+- **Clipboard text and images.** Copy on one machine, paste on the other.
+- **Lightweight.* Rust backend inside a Tauri shell: one small tray app per machine.
+- **Bilingual UI.** English and Simplified Chinese.
 
 ## Quick Start
 
-1. **Install on both machines.** Download the installer for each OS from the [latest release](https://github.com/XxMinor/mykvm/releases/latest).
+1. **Install on both machines.** Download the installer for each OS from the [releases page](https://github.com/PCCCQ/mykvm/releases/latest).
 2. **Pick roles.** On the machine whose keyboard and mouse you want to share, open MyKVM and keep **Server** mode (the default). On the other machine, open MyKVM and switch to **Client** mode in Settings.
 3. **Connect.** On the same LAN the two find each other automatically. Otherwise open **Devices**, type the other machine's IP (optionally `IP:port`), and click **Add**. Only devices that report their screen info join the layout.
 4. **Arrange screens.** Open **Layout** and drag the monitors so their touching edges match how they sit on your desk.
@@ -30,10 +30,11 @@ Move your cursor off the edge of one screen and it lands on the next machine. Yo
 
 ## Permissions
 
-- **macOS (server).** Grant MyKVM both **Accessibility** and **Input Monitoring** under System Settings → Privacy & Security. These are required to capture and inject keyboard/mouse input. Signed builds keep the grant across updates; if it ever drops, toggle it off and on.
+- **macOS (server).** Grant MyKVM both **Accessibility** and **Input Monitoring** under System Settings → Privacy & Security. These are required to capture and inject keyboard/mouse input.
 - **macOS first launch.** Builds are free self-signed (not Apple-notarized), so Gatekeeper warns the first time. Right-click the app → **Open** → **Open** to allow it once.
 - **Windows.** No special permission for normal use. Run as Administrator only if you need to control elevated/admin windows.
-- **Linux.** If you use the AppImage, mark it executable (`chmod +x`).
+- **Linux.** Input sharing requires an **X11/Xorg session**: XTEST is used to inject input and XFIXES to hide the local cursor while a remote screen is active (both extensions ship with virtually every X server). A Wayland-native session has no X display and cannot share input — MyKVM shows a clear error in that case; under XWayland it runs but global grabbing can be limited.
+- **Linux keyboard layouts.** Keys are translated through the server keymap, so character keys (letters, digits, punctuation) type correctly across mixed layouts. AltGr-only symbols, dead keys, media keys and NumLock-dependent keypad semantics are not translated (those events are dropped and logged).
 
 ## Limitations
 
@@ -51,16 +52,15 @@ Move your cursor off the edge of one screen and it lands on the next machine. Yo
 - Discovers nearby peers on the LAN.
 - Supports manual peer connection by host or IP.
 - Detects local displays and lets you arrange multi-monitor layouts.
-- Shares keyboard and mouse input over an encrypted QUIC connection.
+- Shares keyboard and mouse input **in both directions** over an encrypted QUIC connection (macOS ↔ Windows ↔ Linux).
 - Syncs clipboard text and images over the same encrypted connection.
 - Provides light, dark, and system theme modes.
 - Includes English and Simplified Chinese UI.
 - Supports tray behavior for hiding and restoring the main window.
-- Checks GitHub Releases and updates itself in place.
 
 ## Current Status
 
-MyKVM is an experimental early release. It is useful for local testing and iteration, but it is not hardened for untrusted networks. See the [Releases page](https://github.com/XxMinor/mykvm/releases) for the current version and installers.
+MyKVM is an experimental early release. It is useful for local testing and iteration, but it is not hardened for untrusted networks. See the [Releases page](https://github.com/PCCCQ/mykvm/releases) for the current version and installers.
 
 - License: MIT
 - Default ports: UDP `47833` (discovery) and UDP `47834` (QUIC transport)
@@ -92,7 +92,7 @@ The QUIC connection is TLS 1.3 encrypted: each peer generates a self-signed cert
 - Platform desktop toolchain:
   - Windows: Microsoft C++ Build Tools
   - macOS: Xcode Command Line Tools
-  - Linux: WebKitGTK and appindicator development packages
+  - Linux: WebKitGTK and appindicator development packages (`libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf`)
 
 ## Development
 
@@ -142,8 +142,6 @@ sh scripts/check-dev-env.sh
 sh scripts/run-tauri-dev.sh
 ```
 
-macOS input capture and injection require Accessibility and Input Monitoring permissions in System Settings.
-
 ## Verification
 
 Run these before opening a pull request or cutting a release:
@@ -152,6 +150,7 @@ Run these before opening a pull request or cutting a release:
 npm run build
 npm run lint
 cargo check --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/Cargo.toml
 ```
 
 ## Release
@@ -186,12 +185,13 @@ The workflow creates the git tag, builds macOS, Windows, and Linux bundles, then
 | `src/runtime.ts` | Runtime status types |
 | `src-tauri/src/lib.rs` | Tauri commands, UDP discovery, clipboard sync, app state, and performance sampling |
 | `src-tauri/src/input.rs` | Input capture, forwarding, and injection runtime |
+| `src-tauri/src/linux_input.rs` | Linux X11 backend: pointer/keyboard capture, keymap translation, and XTEST injection |
 | `src-tauri/src/quic_transport.rs` | Encrypted QUIC transport (input datagrams, clipboard streams) with certificate pinning |
 | `scripts/` | Development and build helper scripts |
 
 ## Contributing
 
-Issues and pull requests are welcome. Keep changes focused, document behavior that affects the protocol, and verify both the web build and the Tauri backend when touching shared runtime code.
+Issues and pull requests are welcome. Keep changes focused, document behavior that affects the protocol, and verify both the web build and the Tauri backend when touching shared runtime code. Linux input changes should include a live X11 probe run: `cargo test -p mykvm -- --ignored x11_backend_probe`.
 
 See [CONTRIBUTING.md](./CONTRIBUTING.md) for commit prefixes and versioning notes.
 

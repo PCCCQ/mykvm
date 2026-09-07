@@ -30,7 +30,6 @@
   },
   "bundle": {
     "active": true,
-    "createUpdaterArtifacts": true,
     "targets": "all",
     "icon": [
       "icons/32x32.png",
@@ -45,17 +44,6 @@
     "windows": {
       "nsis": {
         "installerHooks": "nsis-hooks.nsh"
-      }
-    }
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEY4NTQyMTlDMkRCREIxQ0EKUldUS3NiMHRuQ0ZVK0pQK3pnV3ZkcnJxUjMzclVoQUh6Vk5lVlNyRzVvRFdWcVF6OWlOUmpEMFIK",
-      "endpoints": [
-        "https://github.com/XxMinor/mykvm/releases/latest/download/latest.json"
-      ],
-      "windows": {
-        "installMode": "passive"
       }
     }
   }

@@ -184,7 +184,7 @@ jobs:
             echo ""
             echo "## Downloads"
             echo ""
-            echo "- macOS: download the .dmg, then drag MyKVM to Applications. The .app.tar.gz file is for automatic updates only."
+            echo "- macOS: download the .dmg, then drag MyKVM to Applications."
             echo "- Windows: download the .exe installer."
             echo "- Linux: download the AppImage, .deb, or .rpm package."
             echo ""
@@ -265,64 +265,6 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate updater signing key
-        shell: bash
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-        run: |
-          set -euo pipefail
-          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
-            echo "::error::TAURI_SIGNING_PRIVATE_KEY is required to create signed updater artifacts."
-            exit 1
-          fi
-
-          probe="$(mktemp)"
-          printf 'mykvm updater signing key check' > "$probe"
-          if [ -n "${TAURI_SIGNING_PRIVATE_KEY_PASSWORD:-}" ]; then
-            npm exec -- tauri signer sign "$probe" --password "$TAURI_SIGNING_PRIVATE_KEY_PASSWORD" >/dev/null
-          else
-            npm exec -- tauri signer sign "$probe" >/dev/null
-          fi
-
-          PROBE="$probe" node <<'NODE'
-          const fs = require('fs');
-
-          const config = JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8'));
-          const pubkey = config?.plugins?.updater?.pubkey;
-          if (!pubkey) {
-            console.error('::error::plugins.updater.pubkey is required.');
-            process.exit(1);
-          }
-
-          const decodeTauriSignatureText = (value) =>
-            Buffer.from(value.trim(), 'base64').toString('utf8').trim().split(/\r?\n/);
-
-          const keyIdFromPayload = (payload) => {
-            const bytes = Buffer.from(payload.trim(), 'base64');
-            if (bytes.length < 10) {
-              throw new Error('minisign payload is too short to contain a key id');
-            }
-            return Buffer.from(bytes.subarray(2, 10)).reverse().toString('hex').toUpperCase();
-          };
-
-          const publicLines = decodeTauriSignatureText(pubkey);
-          const signatureLines = decodeTauriSignatureText(
-            fs.readFileSync(`${process.env.PROBE}.sig`, 'utf8'),
-          );
-          const configuredKeyId = keyIdFromPayload(publicLines[1]);
-          const signingKeyId = keyIdFromPayload(signatureLines[1]);
-
-          if (configuredKeyId !== signingKeyId) {
-            console.error(
-              `::error::TAURI_SIGNING_PRIVATE_KEY key id ${signingKeyId} does not match src-tauri/tauri.conf.json updater pubkey id ${configuredKeyId}. Existing apps will reject updater artifacts signed by this key.`,
-            );
-            process.exit(1);
-          }
-
-          console.log(`Updater signing key matches configured pubkey (${configuredKeyId}).`);
-          NODE
-
       - name: Apply release version
         shell: bash
         env:
@@ -332,15 +274,9 @@ jobs:
           node - <<'NODE'
           const fs = require('fs');
           const version = process.env.RELEASE_VERSION;
-          const channel = process.env.RELEASE_CHANNEL;
           for (const file of ['package.json', 'src-tauri/tauri.conf.json']) {
             const data = JSON.parse(fs.readFileSync(file, 'utf8'));
             data.version = version;
-            if (file === 'src-tauri/tauri.conf.json' && channel === 'beta') {
-              data.plugins.updater.endpoints = [
-                'https://github.com/XxMinor/mykvm/releases/download/beta/latest.json',
-              ];
-            }
             fs.writeFileSync(file, `${JSON.stringify(data, null, 2)}\n`);
           }
 
@@ -488,8 +424,6 @@ jobs:
         uses: tauri-apps/tauri-action@action-v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           # Notarization credentials are NOT wired in here: passing unset secrets
           # injects empty strings, which Tauri reads as "present" and tries to
@@ -502,17 +436,10 @@ jobs:
           tagName: ${{ needs.prepare.outputs.tag }}
           releaseName: "MyKVM ${{ needs.prepare.outputs.tag }}"
           releaseBody: ${{ needs.prepare.outputs.release_notes }}
-          # Keep the release a DRAFT until latest.json is attached (published by
-          # the assemble-latest-json job below). Otherwise the release becomes
-          # "latest" the moment the first platform bundle uploads, and the in-app
-          # updater (releases/latest/download/latest.json) 404s for the rest of
-          # the build. A failed build also never becomes "latest" this way.
-          releaseDraft: true
+          # No in-app updater: draft stays false so the release becomes
+          # "latest" as soon as its first platform bundle lands.
+          releaseDraft: false
           prerelease: ${{ needs.prepare.outputs.channel == 'beta' }}
-          # latest.json is assembled by the dedicated assemble-latest-json job
-          # (single source of truth across platforms); the .sig artifacts are
-          # uploaded by tauri-action regardless.
-          includeUpdaterJson: false
 
       - name: Verify macOS signing
         if: matrix.name == 'macos'
@@ -525,7 +452,6 @@ jobs:
 
           app_path="$(find src-tauri/target -path '*/release/bundle/macos/*.app' -type d | head -n 1)"
           dmg_path="$(find src-tauri/target -path '*/release/bundle/dmg/*.dmg' -type f | head -n 1)"
-          tar_path="$(find src-tauri/target -path '*/release/bundle/macos/*.app.tar.gz' -type f | head -n 1)"
 
           if [ -z "$app_path" ]; then
             echo "::error::No macOS .app bundle was produced."
@@ -534,11 +460,6 @@ jobs:
 
           if [ -z "$dmg_path" ]; then
             echo "::error::No macOS .dmg installer was produced."
-            exit 1
-          fi
-
-          if [ -z "$tar_path" ] || [ ! -f "$tar_path.sig" ]; then
-            echo "::error::No signed macOS updater .app.tar.gz artifact was produced."
             exit 1
           fi
 
@@ -554,166 +475,4 @@ jobs:
             spctl -a -t open --context context:primary-signature -vv "$dmg_path"
           else
             echo "Self-signed (non-notarized) build: skipping spctl Gatekeeper checks."
-          fi
-
-  assemble-latest-json:
-    name: Assemble updater manifest
-    needs:
-      - prepare
-      - build
-    if: needs.prepare.outputs.should_release == 'true'
-    runs-on: ubuntu-22.04
-    permissions:
-      contents: write
-
-    steps:
-      - name: Download release assets
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p dl
-          gh release download "$TAG" --dir dl --repo "$GITHUB_REPOSITORY" --clobber
-          find dl -maxdepth 1 -type f -printf '%f\n' | sort
-
-      - name: Generate latest.json
-        env:
-          REPO: ${{ github.repository }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-          VERSION: ${{ needs.prepare.outputs.version }}
-          RELEASE_NOTES: ${{ needs.prepare.outputs.release_notes }}
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require('fs');
-          const path = require('path');
-
-          const dir = 'dl';
-          let files = fs.readdirSync(dir);
-          const tag = process.env.TAG;
-          const version = process.env.VERSION;
-          const notes = process.env.RELEASE_NOTES || `Release ${tag}`;
-          const baseUrl = `https://github.com/${process.env.REPO}/releases/download/${tag}`;
-          const assetUrl = (name) => `${baseUrl}/${encodeURIComponent(name)}`;
-          const signatureFor = (name) => {
-            const sigName = `${name}.sig`;
-            return files.includes(sigName)
-              ? fs.readFileSync(path.join(dir, sigName), 'utf8').trim()
-              : null;
-          };
-          const platforms = {};
-
-          const addPlatform = (key, assetName) => {
-            const signature = signatureFor(assetName);
-            if (!signature) {
-              console.warn(`Skipping ${key}: missing signature for ${assetName}`);
-              return false;
-            }
-
-            platforms[key] = {
-              signature,
-              url: assetUrl(assetName),
-            };
-            return true;
-          };
-
-          const macAsset = files.find((name) => /\.app\.tar\.gz$/i.test(name));
-          if (!macAsset) {
-            throw new Error('No macOS updater .app.tar.gz asset found.');
-          }
-          const macAdded =
-            addPlatform('darwin-aarch64', macAsset) &&
-            addPlatform('darwin-x86_64', macAsset);
-          if (!macAdded) {
-            throw new Error(`Missing signature for macOS updater asset ${macAsset}.`);
-          }
-
-          const windowsAsset = files.find(
-            (name) =>
-              !name.endsWith('.sig') &&
-              name !== 'mykvm-windows-x64-setup.exe' &&
-              (/setup\.exe$/i.test(name) || /\.msi$/i.test(name)),
-          );
-          if (windowsAsset) {
-            const windowsUpdaterAsset = 'mykvm-windows-x64-setup.exe';
-            fs.copyFileSync(path.join(dir, windowsAsset), path.join(dir, windowsUpdaterAsset));
-            fs.copyFileSync(
-              path.join(dir, `${windowsAsset}.sig`),
-              path.join(dir, `${windowsUpdaterAsset}.sig`),
-            );
-            files = fs.readdirSync(dir);
-            addPlatform('windows-x86_64', windowsUpdaterAsset);
-          }
-
-          const linuxAsset = files.find(
-            (name) =>
-              !name.endsWith('.sig') &&
-              /\.AppImage$/i.test(name) &&
-              /(amd64|x86_64)/i.test(name),
-          );
-          if (linuxAsset) {
-            addPlatform('linux-x86_64', linuxAsset);
-          }
-
-          fs.writeFileSync(
-            'latest.json',
-            `${JSON.stringify(
-              {
-                version,
-                notes,
-                pub_date: new Date().toISOString(),
-                platforms,
-              },
-              null,
-              2,
-            )}\n`,
-          );
-
-          console.log(fs.readFileSync('latest.json', 'utf8'));
-          NODE
-
-      - name: Upload latest.json
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-          CHANNEL: ${{ needs.prepare.outputs.channel }}
-        run: |
-          set -euo pipefail
-          if [[ -f dl/mykvm-windows-x64-setup.exe ]]; then
-            gh release upload "$TAG" \
-              dl/mykvm-windows-x64-setup.exe \
-              dl/mykvm-windows-x64-setup.exe.sig \
-              --clobber \
-              --repo "$GITHUB_REPOSITORY"
-          fi
-          gh release upload "$TAG" latest.json --clobber --repo "$GITHUB_REPOSITORY"
-          if [[ "$CHANNEL" == "beta" ]]; then
-            if gh release view beta --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-              gh release upload beta latest.json --clobber --repo "$GITHUB_REPOSITORY"
-            else
-              gh release create beta latest.json \
-                --target "$GITHUB_SHA" \
-                --title "MyKVM Beta Updates" \
-                --notes "Updater manifest for beta builds." \
-                --prerelease \
-                --latest=false \
-                --repo "$GITHUB_REPOSITORY"
-            fi
-          fi
-
-      - name: Publish release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ needs.prepare.outputs.tag }}
-          CHANNEL: ${{ needs.prepare.outputs.channel }}
-        run: |
-          set -euo pipefail
-          # Now that every platform bundle AND latest.json are attached, flip the
-          # draft to published. Only at this point does releases/latest advance to
-          # this tag, so the in-app updater never sees a manifest-less release.
-          if [[ "$CHANNEL" == "beta" ]]; then
-            gh release edit "$TAG" --draft=false --prerelease --latest=false --repo "$GITHUB_REPOSITORY"
-          else
-            gh release edit "$TAG" --draft=false --latest --repo "$GITHUB_REPOSITORY"
           fi

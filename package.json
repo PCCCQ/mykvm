@@ -4,7 +4,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/XxMinor/mykvm.git"
+    "url": "https://github.com/PCCCQ/mykvm.git"
   },
   "type": "module",
   "scripts": {
@@ -24,7 +24,6 @@
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",
     "@tauri-apps/plugin-process": "^2.3.1",
-    "@tauri-apps/plugin-updater": "^2.10.1",
     "react": "^19.2.5",
     "react-dom": "^19.2.5"
   },

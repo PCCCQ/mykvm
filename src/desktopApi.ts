@@ -1,5 +1,5 @@
 import { invoke, isTauri } from '@tauri-apps/api/core'
-import { APP_VERSION, RELEASES_URL, REPOSITORY_URL } from './constants'
+import { APP_VERSION, REPOSITORY_URL } from './constants'
 import { defaultLayout } from './defaultLayout'
 import type {
   AppStateSnapshot,
@@ -10,18 +10,6 @@ import type {
   RuntimeStatus,
 } from './runtime'
 import type { LayoutState } from './types'
-
-export interface AppUpdateInfo {
-  version: string
-  currentVersion?: string
-  date?: string
-  body?: string
-}
-
-export interface AppUpdateCheckResult {
-  available: boolean
-  update?: AppUpdateInfo
-}
 
 export interface FileTransferSummary {
   targetName: string
@@ -356,15 +344,6 @@ export async function openRepositoryUrl(): Promise<void> {
   await invoke('open_repository_url')
 }
 
-export async function openUpdateReleasePage(): Promise<void> {
-  if (!isTauri()) {
-    window.open(RELEASES_URL, '_blank', 'noopener,noreferrer')
-    return
-  }
-
-  await invoke('open_releases_url')
-}
-
 export async function isPortableMode(): Promise<boolean> {
   if (!isTauri()) {
     return false
@@ -373,55 +352,5 @@ export async function isPortableMode(): Promise<boolean> {
   return invoke<boolean>('is_portable_mode')
 }
 
-export async function checkForAppUpdate(): Promise<AppUpdateCheckResult> {
-  if (!isTauri()) {
-    return { available: false }
-  }
 
-  const { check } = await import('@tauri-apps/plugin-updater')
-  const update = await check()
 
-  if (!update) {
-    return { available: false }
-  }
-
-  return {
-    available: true,
-    update: {
-      version: update.version,
-      currentVersion: update.currentVersion,
-      date: update.date,
-      body: update.body,
-    },
-  }
-}
-
-export async function setAppUpgrading(enabled: boolean): Promise<void> {
-  if (!isTauri()) return
-  await invoke('set_app_upgrading', { enabled })
-}
-
-export async function installAppUpdate(): Promise<void> {
-  if (!isTauri()) {
-    return
-  }
-
-  const [{ check }, { relaunch }] = await Promise.all([
-    import('@tauri-apps/plugin-updater'),
-    import('@tauri-apps/plugin-process'),
-  ])
-  const update = await check()
-
-  if (!update) {
-    return
-  }
-
-  await setAppUpgrading(true).catch(() => {})
-  try {
-    await update.downloadAndInstall()
-  } catch (error) {
-    await setAppUpgrading(false).catch(() => {})
-    throw error
-  }
-  await relaunch()
-}

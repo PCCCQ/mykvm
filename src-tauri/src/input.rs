@@ -721,7 +721,37 @@ pub fn input_runtime_status(
             ),
         }
     } else {
-        unsupported_capture_status()
+        #[cfg(target_os = "linux")]
+        {
+            match crate::linux_input::probe() {
+                Ok(probe) => {
+                    let mut detail = format!(
+                        "控制端已就绪，{} 条远端贴边可用于鼠标和键盘切换。",
+                        targets.len()
+                    );
+                    if probe.xwayland_hint {
+                        detail.push_str(
+                            "（XWayland 会话下全局抓取可能受限，建议改用 X11/Xorg 会话）",
+                        );
+                    }
+                    NativeStageStatus {
+                        state: "ready".into(),
+                        detail,
+                    }
+                }
+                Err(error) => NativeStageStatus {
+                    state: "error".into(),
+                    detail: linux_x11_error_detail("X11 不可用", &error),
+                },
+            }
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+        {
+            NativeStageStatus {
+                state: "stubbed".into(),
+                detail: "Global input capture is not implemented on this platform.".into(),
+            }
+        }
     };
 
     (capture, input_receive_status(layout, false))
@@ -729,6 +759,23 @@ pub fn input_runtime_status(
 
 fn input_receive_status(layout: &LayoutState, request_permission: bool) -> NativeStageStatus {
     let _ = request_permission;
+
+    #[cfg(target_os = "linux")]
+    if let Err(error) = crate::linux_input::probe() {
+        return NativeStageStatus {
+            state: "error".into(),
+            detail: linux_x11_error_detail("输入注入需要 X11", &error),
+        };
+    }
+    #[cfg(target_os = "linux")]
+    if let Ok(probe) = crate::linux_input::probe() {
+        if !probe.xtest_available {
+            return NativeStageStatus {
+                state: "error".into(),
+                detail: "X 服务器缺少 XTEST 扩展，无法注入鼠标键盘事件。".into(),
+            };
+        }
+    }
 
     #[cfg(target_os = "macos")]
     if !macos_accessibility_trusted(request_permission) {
@@ -862,7 +909,6 @@ fn start_platform_capture(
             main_window_visible,
             clipboard_target,
             input_events,
-            targets,
             switch_request,
             anchor: Mutex::new(None),
             cursor_hidden: Mutex::new(false),
@@ -1063,7 +1109,6 @@ fn start_platform_capture(
             main_window_focused,
             clipboard_target,
             input_events,
-            targets,
             switch_request,
             anchor: Mutex::new(None),
             last_point: Mutex::new(None),
@@ -1165,24 +1210,683 @@ fn start_platform_capture(
     }
 }
 
-#[cfg(not(target_os = "macos"))]
-#[cfg(not(target_os = "windows"))]
+/// Linux capture: X11 only. A thread owns one X connection and, while a remote
+/// screen is active, grabs the pointer and keyboard on it — events are then
+/// delivered exclusively to us (which also swallows them locally, matching the
+/// Windows low-level hooks) and drive the same remote-coordinate state machine
+/// the Windows path uses. In local mode the loop polls the pointer and feeds
+/// the shared edge-crossing logic. Wayland-native sessions have no X display
+/// and surface an error instead (see `linux_x11_error_detail`).
+#[cfg(target_os = "linux")]
 fn start_platform_capture(
-    _targets: Vec<InputTarget>,
-    _layout_state: Arc<Mutex<LayoutState>>,
-    _native_layout: LayoutState,
-    _quic_transport: quic_transport::TransportHandle,
-    _stop: Arc<AtomicBool>,
+    targets: Vec<InputTarget>,
+    layout_state: Arc<Mutex<LayoutState>>,
+    native_layout: LayoutState,
+    quic_transport: quic_transport::TransportHandle,
+    stop: Arc<AtomicBool>,
     remote_active: Arc<AtomicBool>,
     _main_window_visible: Arc<AtomicBool>,
     _main_window_focused: Arc<AtomicBool>,
     clipboard_target: Arc<Mutex<Option<ClipboardTarget>>>,
-    _input_events: Arc<AtomicU64>,
-    _switch_request: Arc<Mutex<Option<SwitchDirection>>>,
+    input_events: Arc<AtomicU64>,
+    switch_request: Arc<Mutex<Option<SwitchDirection>>>,
 ) -> NativeStageStatus {
-    remote_active.store(false, Ordering::Relaxed);
-    clear_clipboard_target(&clipboard_target);
-    unsupported_capture_status()
+    let target_count = targets.len();
+    let (ready_tx, ready_rx) = mpsc::channel();
+
+    thread::spawn(move || {
+        let x11 = match crate::linux_input::X11::open(false) {
+            Ok(x11) => x11,
+            Err(error) => {
+                let _ = ready_tx
+                    .send(Err(linux_x11_error_detail("无法连接 X11 显示", &error)));
+                return;
+            }
+        };
+        let context = Arc::new(LinuxCaptureContext {
+            x11,
+            quic_transport,
+            layout_state,
+            native_layout,
+            active: Mutex::new(None),
+            remote_active,
+            clipboard_target,
+            input_events,
+            switch_request,
+            anchor: Mutex::new(None),
+            last_point: Mutex::new(None),
+            last_mouse_move_sent: Mutex::new(None),
+            remote_button_mask: AtomicU64::new(0),
+            pressed_keys: Mutex::new(Vec::new()),
+            just_crossed: AtomicBool::new(false),
+            modifiers: Mutex::new(HotkeyModifiers::default()),
+            last_enter_attempt: Mutex::new(None),
+            local_screen_points: Mutex::new(HashMap::new()),
+        });
+        let _ = ready_tx.send(Ok(()));
+
+        while !stop.load(Ordering::Relaxed) {
+            drain_switch_request_linux(&context);
+            let remote = context
+                .active
+                .lock()
+                .ok()
+                .map(|active| active.is_some())
+                .unwrap_or(false);
+            if remote {
+                linux_drain_x11_events(&context);
+                // Events arrive in the queue as the server generates them; a
+                // short sleep only bounds latency of the periodic duties above.
+                thread::sleep(Duration::from_millis(1));
+            } else {
+                linux_poll_local_pointer(&context);
+                thread::sleep(Duration::from_millis(4));
+            }
+        }
+
+        linux_return_to_local(&context, true, false, None);
+        context.x11.show_cursor();
+        let _ = context.x11.ungrab_pointer_and_keyboard();
+        context.remote_active.store(false, Ordering::Relaxed);
+        clear_clipboard_target(&context.clipboard_target);
+    });
+
+    match ready_rx.recv_timeout(Duration::from_secs(1)) {
+        Ok(Ok(())) => NativeStageStatus {
+            state: "ready".into(),
+            detail: format!("控制端已就绪，{target_count} 条远端贴边可用于鼠标和键盘切换。"),
+        },
+        Ok(Err(error)) => NativeStageStatus {
+            state: "error".into(),
+            detail: error,
+        },
+        Err(_) => NativeStageStatus {
+            state: "error".into(),
+            detail: "Linux input capture did not become ready.".into(),
+        },
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct LinuxCaptureContext {
+    x11: crate::linux_input::X11,
+    quic_transport: quic_transport::TransportHandle,
+    layout_state: Arc<Mutex<LayoutState>>,
+    native_layout: LayoutState,
+    active: Mutex<Option<ActiveTarget>>,
+    remote_active: Arc<AtomicBool>,
+    clipboard_target: Arc<Mutex<Option<ClipboardTarget>>>,
+    input_events: Arc<AtomicU64>,
+    switch_request: Arc<Mutex<Option<SwitchDirection>>>,
+    anchor: Mutex<Option<(f64, f64)>>,
+    last_point: Mutex<Option<(f64, f64)>>,
+    last_mouse_move_sent: Mutex<Option<Instant>>,
+    remote_button_mask: AtomicU64,
+    pressed_keys: Mutex<Vec<u16>>,
+    // Swallow the first post-crossing motion so a fast flick across the edge
+    // does not shove the remote cursor inward (we pin by warping, like Windows).
+    just_crossed: AtomicBool,
+    // Live modifier state derived from the grabbed key stream, used to match
+    // the return-to-local hotkey while a remote screen is active.
+    modifiers: Mutex<HotkeyModifiers>,
+    // Debounces repeated edge-crossing attempts when an enter failed (e.g. a
+    // grab was refused): re-trying every poll tick would spam the log.
+    last_enter_attempt: Mutex<Option<Instant>>,
+    local_screen_points: Mutex<HashMap<String, (f64, f64)>>,
+}
+
+/// A human-readable explanation for an X11 failure, mentioning the Wayland
+/// case explicitly (the most common way a Linux desktop ends up without a
+/// usable X display).
+#[cfg(target_os = "linux")]
+fn linux_x11_error_detail(context: &str, error: &str) -> String {
+    if !std::env::var("WAYLAND_DISPLAY").unwrap_or_default().is_empty() {
+        format!(
+            "{context}：{error}。检测到 Wayland 会话 — Linux 输入共享目前需要 X11/Xorg \
+             会话（Wayland 原生会话禁止第三方应用全局接管输入）。请改用 X11 会话登录后重试。"
+        )
+    } else {
+        format!("{context}：{error}。Linux 输入共享需要 X11 图形会话。")
+    }
+}
+
+/// Processes every queued X event while a remote screen is active. Stops as
+/// soon as the handlers hand control back to the local machine — events that
+/// were queued before the ungrab are stale by then.
+#[cfg(target_os = "linux")]
+fn linux_drain_x11_events(context: &LinuxCaptureContext) {
+    use x11rb::protocol::Event as XEvent;
+
+    while let Some(event) = context.x11.poll_event() {
+        match event {
+            XEvent::MotionNotify(event) => {
+                linux_handle_mouse_move(context, event.root_x as f64, event.root_y as f64)
+            }
+            XEvent::ButtonPress(event) if (4..=7).contains(&event.detail) => {
+                linux_handle_wheel(context, event.detail)
+            }
+            XEvent::ButtonRelease(event) if (4..=7).contains(&event.detail) => {
+                // X11 models each wheel notch as a press+release pair; forward
+                // on the press only, like the Windows wheel message.
+            }
+            XEvent::ButtonPress(event) => linux_handle_mouse_button(context, event.detail, true),
+            XEvent::ButtonRelease(event) => linux_handle_mouse_button(context, event.detail, false),
+            XEvent::KeyPress(event) => {
+                linux_handle_key(context, event.detail, u16::from(event.state), true)
+            }
+            XEvent::KeyRelease(event) => {
+                linux_handle_key(context, event.detail, u16::from(event.state), false)
+            }
+            _ => {}
+        }
+        let remote = context
+            .active
+            .lock()
+            .ok()
+            .map(|active| active.is_some())
+            .unwrap_or(false);
+        if !remote {
+            break;
+        }
+    }
+}
+
+/// Injects nothing; the local mode of the Linux capture is a pointer poll
+/// (there are no passive global events to listen to under X11 without
+/// consuming them). Mirrors the local branch of the Windows mouse hook: track
+/// deltas between polls and hand any crossing to the shared enter sequence.
+#[cfg(target_os = "linux")]
+fn linux_poll_local_pointer(context: &LinuxCaptureContext) {
+    let Some((x, y)) = context.x11.query_pointer() else {
+        return;
+    };
+    let previous = context
+        .last_point
+        .lock()
+        .ok()
+        .and_then(|last_point| *last_point);
+    let (dx, dy) = previous
+        .map(|point| (x - point.0, y - point.1))
+        .unwrap_or((0.0, 0.0));
+    if let Ok(mut last_point) = context.last_point.lock() {
+        *last_point = Some((x, y));
+    }
+
+    if context
+        .last_enter_attempt
+        .lock()
+        .ok()
+        .and_then(|attempt| *attempt)
+        .map(|attempt| attempt.elapsed() < Duration::from_millis(300))
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let targets = current_input_targets(&context.layout_state, &context.native_layout);
+    if let Some(active_target) = crossing_target(&targets, x, y, dx, dy) {
+        if !linux_enter_remote(context, active_target, true) {
+            if let Ok(mut attempt) = context.last_enter_attempt.lock() {
+                *attempt = Some(Instant::now());
+            }
+        }
+    }
+}
+
+/// The remote-coordinate state machine, one physical motion event in. Ported
+/// from the Windows mouse hook handler: while a remote is active the physical
+/// pointer is pinned to the local anchor by warping and only the deltas are
+/// applied to the remote cursor.
+#[cfg(target_os = "linux")]
+fn linux_handle_mouse_move(context: &LinuxCaptureContext, x: f64, y: f64) {
+    let mut active = match context.active.lock() {
+        Ok(active) => active,
+        Err(_) => return,
+    };
+    let Some(active_target) = active.as_mut() else {
+        return;
+    };
+
+    let anchor = context
+        .anchor
+        .lock()
+        .ok()
+        .and_then(|anchor| *anchor)
+        .unwrap_or((x, y));
+    let dx = x - anchor.0;
+    let dy = y - anchor.1;
+    if dx.abs() < 0.1 && dy.abs() < 0.1 {
+        return;
+    }
+    if context.just_crossed.swap(false, Ordering::Relaxed) {
+        // Residual flick velocity from the crossing: re-pin and swallow.
+        context.x11.warp_pointer(anchor.0, anchor.1);
+        return;
+    }
+
+    active_target.x += dx;
+    active_target.y += dy;
+
+    if update_active_remote_screen(active_target, dx, dy, &context.layout_state) {
+        let point = local_return_point(active_target);
+        let target = active_target.target.clone();
+        // Natural exit back to the local machine: park the remote cursor out
+        // of the way, then release everything and land on the entry edge.
+        // Inlined instead of `linux_return_to_local` — the `active` guard is
+        // held here and that helper would deadlock re-taking it.
+        let _ = send_remote_cursor_park(
+            &context.quic_transport,
+            active_target,
+            &context.layout_state,
+            &context.input_events,
+        );
+        *active = None;
+        context.remote_active.store(false, Ordering::Relaxed);
+        release_forwarded_keys_linux(context, &target);
+        release_remote_buttons(
+            &context.quic_transport,
+            &target,
+            &context.remote_button_mask,
+            &context.layout_state,
+            &context.input_events,
+        );
+        reset_mouse_move_timer(&context.last_mouse_move_sent);
+        context.x11.show_cursor();
+        let _ = context.x11.ungrab_pointer_and_keyboard();
+        context.x11.warp_pointer(point.0, point.1);
+        if let Ok(mut last_point) = context.last_point.lock() {
+            *last_point = Some(point);
+        }
+        if let Ok(mut anchor) = context.anchor.lock() {
+            *anchor = None;
+        }
+        return;
+    }
+
+    active_target.x = active_target
+        .x
+        .clamp(0.0, (active_target.current_screen.width - 1) as f64);
+    active_target.y = active_target
+        .y
+        .clamp(0.0, (active_target.current_screen.height - 1) as f64);
+    let dragging = remote_button_is_down(&context.remote_button_mask);
+    if should_send_mouse_move(&context.last_mouse_move_sent, dragging) {
+        if !send_remote_mouse_move(
+            &context.quic_transport,
+            active_target,
+            &context.layout_state,
+            &context.input_events,
+        ) {
+            *active = None;
+            context.remote_active.store(false, Ordering::Relaxed);
+            clear_clipboard_target(&context.clipboard_target);
+            reset_mouse_move_timer(&context.last_mouse_move_sent);
+            reset_remote_button_mask(&context.remote_button_mask);
+            if let Ok(mut pressed) = context.pressed_keys.lock() {
+                pressed.clear();
+            }
+            context.x11.show_cursor();
+            let _ = context.x11.ungrab_pointer_and_keyboard();
+            if let Ok(mut anchor) = context.anchor.lock() {
+                *anchor = None;
+            }
+            if let Ok(mut last_point) = context.last_point.lock() {
+                *last_point = context.x11.query_pointer();
+            }
+            return;
+        }
+    }
+    context.x11.warp_pointer(anchor.0, anchor.1);
+}
+
+/// Forwards a mouse button press/release to the active remote (X11 buttons:
+/// 1 left, 2 middle, 3 right, 8 back, 9 forward).
+#[cfg(target_os = "linux")]
+fn linux_handle_mouse_button(context: &LinuxCaptureContext, detail: u8, down: bool) {
+    let button = match detail {
+        1 => MouseButton::Left,
+        2 => MouseButton::Middle,
+        3 => MouseButton::Right,
+        8 => MouseButton::Back,
+        9 => MouseButton::Forward,
+        _ => return,
+    };
+    let active = context
+        .active
+        .lock()
+        .ok()
+        .and_then(|active| active.as_ref().cloned());
+    let Some(active_target) = active else {
+        return;
+    };
+    if !send_remote_mouse_move(
+        &context.quic_transport,
+        &active_target,
+        &context.layout_state,
+        &context.input_events,
+    ) {
+        return;
+    }
+    mark_mouse_move_sent(&context.last_mouse_move_sent);
+    let sent = send_packet(
+        &context.quic_transport,
+        &active_target.target,
+        InputEvent::MouseButton { button, down },
+        &context.layout_state,
+        &context.input_events,
+    );
+    if sent {
+        update_remote_button_mask(&context.remote_button_mask, button, down);
+    }
+}
+
+/// Forwards one wheel notch to the active remote (X11 wheel buttons: 4 up,
+/// 5 down, 6 left, 7 right).
+#[cfg(target_os = "linux")]
+fn linux_handle_wheel(context: &LinuxCaptureContext, detail: u8) {
+    let (delta_x, delta_y) = match detail {
+        4 => (0, 1),
+        5 => (0, -1),
+        6 => (-1, 0),
+        7 => (1, 0),
+        _ => return,
+    };
+    let active = context
+        .active
+        .lock()
+        .ok()
+        .and_then(|active| active.as_ref().cloned());
+    let Some(active_target) = active else {
+        return;
+    };
+    if !send_remote_mouse_move(
+        &context.quic_transport,
+        &active_target,
+        &context.layout_state,
+        &context.input_events,
+    ) {
+        return;
+    }
+    mark_mouse_move_sent(&context.last_mouse_move_sent);
+    send_packet(
+        &context.quic_transport,
+        &active_target.target,
+        InputEvent::Scroll { delta_x, delta_y },
+        &context.layout_state,
+        &context.input_events,
+    );
+}
+
+/// Forwards a key press/release to the active remote. Keycodes are translated
+/// through the server keymap to a keysym and then to the VK code used on the
+/// wire; modifier state is tracked from the same stream so the return hotkey
+/// keeps working while the keyboard is grabbed.
+#[cfg(target_os = "linux")]
+fn linux_handle_key(context: &LinuxCaptureContext, keycode: u8, state: u16, down: bool) {
+    let active = context
+        .active
+        .lock()
+        .ok()
+        .and_then(|active| active.as_ref().map(|active| active.target.clone()));
+    let Some(target) = active else {
+        return;
+    };
+
+    let Some(vk) = ({
+        let sym = context.x11.effective_keysym(keycode, state);
+        if sym == 0 {
+            None
+        } else {
+            crate::linux_input::keysym_to_windows_vk(sym)
+        }
+    }) else {
+        log::debug!("linux capture: unmapped keycode {keycode} (state {state:#06x}); dropping");
+        return;
+    };
+
+    linux_update_modifier_state(context, vk, down);
+    let modifiers = context
+        .modifiers
+        .lock()
+        .ok()
+        .map(|guard| *guard)
+        .unwrap_or_default();
+    if down && screen_switch_hotkey_matches_vk(&context.layout_state, vk, modifiers) {
+        log::info!("screen switch hotkey returning to local from X11 key event");
+        linux_return_to_local(context, false, false, None);
+        return;
+    }
+    if send_packet(
+        &context.quic_transport,
+        &target,
+        InputEvent::Key { key_code: vk, down },
+        &context.layout_state,
+        &context.input_events,
+    ) {
+        track_forwarded_key(&context.pressed_keys, vk, down);
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn linux_update_modifier_state(context: &LinuxCaptureContext, vk: u16, down: bool) {
+    let Ok(mut modifiers) = context.modifiers.lock() else {
+        return;
+    };
+    match classify_modifier_vk(vk) {
+        Some(0) => modifiers.ctrl = down,
+        Some(1) => modifiers.alt = down,
+        Some(2) => modifiers.meta = down,
+        Some(_) | None => {
+            if matches!(vk, 0x10 | 0xA0 | 0xA1) {
+                modifiers.shift = down;
+            }
+        }
+    }
+}
+
+/// Rebuilds the modifier latch from the physical keyboard state. Called right
+/// after grabbing, so a hotkey chord that started before the crossing still
+/// matches on its terminating key.
+#[cfg(target_os = "linux")]
+fn linux_refresh_modifier_state(context: &LinuxCaptureContext) {
+    for keycode in context.x11.pressed_keycodes() {
+        let sym = context.x11.effective_keysym(keycode, 0);
+        if let Some(vk) = crate::linux_input::keysym_to_windows_vk(sym) {
+            linux_update_modifier_state(context, vk, true);
+        }
+    }
+}
+
+/// Runs the full enter sequence: grab both devices (which also swallows local
+/// input), hide the cursor, pin the physical pointer to the local anchor and
+/// drop the remote cursor on the entry edge. `crossed_edge` controls whether
+/// the first real motion is treated as crossing residue (mouse enter) or as a
+/// genuine movement (hotkey enter lands on the remote centre).
+#[cfg(target_os = "linux")]
+fn linux_enter_remote(
+    context: &LinuxCaptureContext,
+    active_target: ActiveTarget,
+    crossed_edge: bool,
+) -> bool {
+    let anchor = local_anchor_point(&active_target);
+    if let Err(error) = context.x11.grab_pointer_and_keyboard() {
+        log::warn!("linux capture: entering remote failed, grab refused: {error}");
+        return false;
+    }
+    linux_refresh_modifier_state(context);
+    context.x11.hide_cursor();
+    context.x11.warp_pointer(anchor.0, anchor.1);
+    if !send_remote_mouse_move(
+        &context.quic_transport,
+        &active_target,
+        &context.layout_state,
+        &context.input_events,
+    ) {
+        reset_mouse_move_timer(&context.last_mouse_move_sent);
+        reset_remote_button_mask(&context.remote_button_mask);
+        context.x11.show_cursor();
+        let _ = context.x11.ungrab_pointer_and_keyboard();
+        return false;
+    }
+    mark_mouse_move_sent(&context.last_mouse_move_sent);
+    reset_remote_button_mask(&context.remote_button_mask);
+    context.remote_active.store(true, Ordering::Relaxed);
+    set_control_clipboard_target(
+        &context.clipboard_target,
+        &active_target,
+        &context.layout_state,
+    );
+    if let Ok(mut active) = context.active.lock() {
+        *active = Some(active_target);
+    }
+    if let Ok(mut anchor_state) = context.anchor.lock() {
+        *anchor_state = Some(anchor);
+    }
+    context.just_crossed.store(crossed_edge, Ordering::Relaxed);
+    if let Ok(mut attempt) = context.last_enter_attempt.lock() {
+        *attempt = None;
+    }
+    true
+}
+
+/// Hands control back to the local machine from anywhere (hotkey return,
+/// natural edge exit, send failure, capture stop). Releases every forwarded
+/// key/button on the remote, shows the cursor and ungrabs; when `park` is set
+/// the remote cursor is tucked into a corner first, and `warp_point` (if any)
+/// is where the local cursor lands afterwards.
+#[cfg(target_os = "linux")]
+fn linux_return_to_local(
+    context: &LinuxCaptureContext,
+    clear_clipboard: bool,
+    park: bool,
+    warp_point: Option<(f64, f64)>,
+) {
+    let active_target = context
+        .active
+        .lock()
+        .ok()
+        .and_then(|mut active| active.take());
+
+    if let Some(active_target) = active_target {
+        let target = active_target.target.clone();
+        if park {
+            let _ = send_remote_cursor_park(
+                &context.quic_transport,
+                &active_target,
+                &context.layout_state,
+                &context.input_events,
+            );
+        }
+        release_forwarded_keys_linux(context, &target);
+        release_remote_buttons(
+            &context.quic_transport,
+            &target,
+            &context.remote_button_mask,
+            &context.layout_state,
+            &context.input_events,
+        );
+    } else {
+        reset_remote_button_mask(&context.remote_button_mask);
+        if let Ok(mut pressed) = context.pressed_keys.lock() {
+            pressed.clear();
+        }
+    }
+
+    context.remote_active.store(false, Ordering::Relaxed);
+    context.just_crossed.store(false, Ordering::Relaxed);
+    reset_mouse_move_timer(&context.last_mouse_move_sent);
+    context.x11.show_cursor();
+    let _ = context.x11.ungrab_pointer_and_keyboard();
+    if let Some(point) = warp_point {
+        context.x11.warp_pointer(point.0, point.1);
+        if let Ok(mut last_point) = context.last_point.lock() {
+            *last_point = Some(point);
+        }
+    } else if let Ok(mut last_point) = context.last_point.lock() {
+        // The physical pointer stayed at the anchor; resume polling from there.
+        *last_point = context.x11.query_pointer();
+    }
+    if let Ok(mut anchor) = context.anchor.lock() {
+        *anchor = None;
+    }
+    if clear_clipboard {
+        clear_clipboard_target(&context.clipboard_target);
+    }
+}
+
+/// Sends key-up for every key still marked pressed on the remote, then clears
+/// the set (Linux twin of the Windows helper).
+#[cfg(target_os = "linux")]
+fn release_forwarded_keys_linux(context: &LinuxCaptureContext, target: &InputTarget) {
+    let held = context
+        .pressed_keys
+        .lock()
+        .map(|pressed| pressed.clone())
+        .unwrap_or_default();
+    for key_code in held {
+        send_packet(
+            &context.quic_transport,
+            target,
+            InputEvent::Key {
+                key_code,
+                down: false,
+            },
+            &context.layout_state,
+            &context.input_events,
+        );
+    }
+    if let Ok(mut pressed) = context.pressed_keys.lock() {
+        pressed.clear();
+    }
+}
+
+/// Consumes hotkey switch requests queued by the global-shortcut plugin
+/// (Linux twin of `drain_switch_request_windows`).
+#[cfg(target_os = "linux")]
+fn drain_switch_request_linux(context: &LinuxCaptureContext) {
+    let direction = match context.switch_request.lock() {
+        Ok(mut req) => req.take(),
+        Err(_) => return,
+    };
+    let Some(direction) = direction else { return };
+    let current_point = context.x11.query_pointer();
+    match request_screen_switch_from_point(
+        direction,
+        &context.layout_state,
+        &context.native_layout,
+        &context.active,
+        current_point,
+    ) {
+        SwitchOutcome::Enter(active_target) => {
+            log::info!(
+                "screen switch entering device={}",
+                active_target.target.device_id
+            );
+            linux_enter_remote(context, active_target, false);
+        }
+        SwitchOutcome::Return => {
+            log::info!("screen switch returning to local");
+            linux_return_to_local(context, false, false, None);
+        }
+        SwitchOutcome::LocalMove {
+            from_screen_id,
+            to_screen_id,
+            x,
+            y,
+        } => {
+            let (x, y) = remembered_local_screen_point(
+                &context.local_screen_points,
+                &from_screen_id,
+                &to_screen_id,
+                current_point,
+                (x, y),
+            );
+            log::info!("screen switch moving local cursor to ({x:.0}, {y:.0})");
+            context.x11.warp_pointer(x, y);
+        }
+        SwitchOutcome::Noop => {
+            log::warn!("screen switch {direction:?} ignored: no matching online target");
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -1231,12 +1935,6 @@ fn receive_only_status() -> NativeStageStatus {
     }
 }
 
-fn unsupported_capture_status() -> NativeStageStatus {
-    NativeStageStatus {
-        state: "stubbed".into(),
-        detail: "Global input capture is not implemented on this platform.".into(),
-    }
-}
 
 fn build_input_targets(layout: &LayoutState, native_layout: &LayoutState) -> Vec<InputTarget> {
     let Some(local_device) = layout.devices.iter().find(|device| device.role == "local") else {
@@ -1627,6 +2325,13 @@ fn remap_event_for_target_layout(
         return InputEvent::Key { key_code, down };
     }
     if target_platform == crate::current_platform() {
+        return InputEvent::Key { key_code, down };
+    }
+    // The automatic control<->meta exchange exists for macOS<->Windows
+    // interoperability. A Linux controller already speaks Windows semantics
+    // (Ctrl is Ctrl, Meta is Super/Win), so sessions involving Linux keep the
+    // keys as typed unless the user maps them explicitly.
+    if !matches!(crate::current_platform(), "macos" | "windows") {
         return InputEvent::Key { key_code, down };
     }
 
@@ -2075,7 +2780,10 @@ fn map_relative_to_native_axis(
     (native_start as f64 + ratio * native_size.max(1) as f64).round() as i32
 }
 
-#[cfg(target_os = "windows")]
+/// On Windows and Linux the native pointer space is physical pixels while the
+/// layout stores logical pixels (the monitor scale factor rides `Screen.scale`);
+/// macOS pointers are logical already, so it keeps the identity mapping.
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn platform_native_screen(screen: &Screen) -> Screen {
     let scale = if screen.scale.is_finite() && screen.scale > 0.0 {
         screen.scale
@@ -2092,19 +2800,19 @@ fn platform_native_screen(screen: &Screen) -> Screen {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "macos")]
 fn platform_native_screen(screen: &Screen) -> Screen {
     screen.clone()
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn scale_position(value: i32, scale: f64) -> i32 {
     (value as f64 * scale)
         .round()
         .clamp(i32::MIN as f64, i32::MAX as f64) as i32
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn scale_size(value: i32, scale: f64) -> i32 {
     (value.max(1) as f64 * scale)
         .round()
@@ -2261,7 +2969,11 @@ fn inject_input_command(command: InputCommand) {
         InputCommand::MouseButton { button, down, x, y } => inject_mouse_button(button, down, x, y),
         InputCommand::Scroll { delta_x, delta_y } => inject_scroll(delta_x, delta_y),
         InputCommand::Key { key_code, down } => inject_key(key_code, down),
-        InputCommand::ReleaseAll | InputCommand::SecureAttention => {}
+        InputCommand::ReleaseAll => {
+            #[cfg(target_os = "linux")]
+            crate::linux_input::release_all_injected();
+        }
+        InputCommand::SecureAttention => {}
     }
 }
 
@@ -2941,7 +3653,6 @@ fn windows_current_hotkey_modifiers() -> HotkeyModifiers {
 
 /// Remembers which keys we have forwarded as pressed so they can be released if
 /// the cursor returns to the local machine while a key is still held.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn track_forwarded_key(pressed: &Mutex<Vec<u16>>, key_code: u16, down: bool) {
     if let Ok(mut pressed) = pressed.lock() {
         if down {
@@ -5884,17 +6595,25 @@ fn inject_key(key_code: u16, down: bool) {
     crate::windows_input::inject_key(key_code, down);
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn inject_mouse_move(_x: i32, _y: i32, _drag_button: Option<MouseButton>) {}
+#[cfg(target_os = "linux")]
+fn inject_mouse_move(x: i32, y: i32, drag_button: Option<MouseButton>) {
+    crate::linux_input::inject_mouse_move(x, y, drag_button);
+}
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn inject_mouse_button(_button: MouseButton, _down: bool, _x: i32, _y: i32) {}
+#[cfg(target_os = "linux")]
+fn inject_mouse_button(button: MouseButton, down: bool, x: i32, y: i32) {
+    crate::linux_input::inject_mouse_button(button, down, x, y);
+}
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn inject_scroll(_delta_x: i32, _delta_y: i32) {}
+#[cfg(target_os = "linux")]
+fn inject_scroll(delta_x: i32, delta_y: i32) {
+    crate::linux_input::inject_scroll(delta_x, delta_y);
+}
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-fn inject_key(_key_code: u16, _down: bool) {}
+#[cfg(target_os = "linux")]
+fn inject_key(key_code: u16, down: bool) {
+    crate::linux_input::inject_key(key_code, down);
+}
 
 #[cfg(test)]
 mod tests {

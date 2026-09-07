@@ -12,19 +12,15 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import type { Theme } from "@tauri-apps/api/window";
 import "./App.css";
 import {
-  checkForAppUpdate,
   confirmLanPairing,
   dismissPairingRequest,
   hideMainWindow,
   installInputService,
-  installAppUpdate,
   isAutostartEnabled,
-  isPortableMode,
   loadAppState,
   minimizeMainWindow,
   openLogDirectory,
   openRepositoryUrl,
-  openUpdateReleasePage,
   probeLanPeer,
   readDiagnosticInfo,
   readInputServiceStatus,
@@ -46,10 +42,8 @@ import {
   uninstallInputService,
   writeClipboardText,
 } from "./desktopApi";
-import type { AppUpdateInfo } from "./desktopApi";
 import { APP_VERSION, REPOSITORY_URL } from "./constants";
 import { TEXT } from "./i18n";
-import type { AppText } from "./i18n";
 import {
   formatEdgeSwitchHotkeyForDisplay,
   hotkeyFromKeyboardEvent,
@@ -116,14 +110,6 @@ type WorkspaceTab = (typeof WORKSPACE_TABS)[number]["id"];
 
 const CLIENT_TABS: WorkspaceTab[] = ["settings"];
 const PERFORMANCE_SAMPLE_LIMIT = 32;
-const UPDATE_DISMISSED_VERSION_KEY = "mykvm:update:dismissedVersion";
-type UpdateStatus =
-  | "idle"
-  | "checking"
-  | "available"
-  | "current"
-  | "installing"
-  | "error";
 type InputServiceAction = "install" | "uninstall";
 
 interface ServerPairingState {
@@ -206,14 +192,6 @@ function App() {
   const [performanceSamples, setPerformanceSamples] = useState<
     PerformanceSample[]
   >([]);
-  const [updateStatus, setUpdateStatus] = useState<UpdateStatus>("idle");
-  const [availableUpdate, setAvailableUpdate] =
-    useState<AppUpdateInfo | null>(null);
-  const [updateMessage, setUpdateMessage] = useState<string | null>(null);
-  const [dismissedUpdateVersion, setDismissedUpdateVersion] = useState<
-    string | null
-  >(() => localStorage.getItem(UPDATE_DISMISSED_VERSION_KEY));
-  const [isPortable, setIsPortable] = useState(false);
   const [autostartEnabled, setAutostartEnabled] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [isCapturingEdgeSwitchHotkey, setIsCapturingEdgeSwitchHotkey] =
@@ -232,7 +210,6 @@ function App() {
   >({ left: null, right: null, up: null, down: null });
   const fileDragTargetIdRef = useRef<string | null>(null);
   const fileTransferFallbackTargetIdRef = useRef<string | null>(null);
-  const startupUpdateCheckStarted = useRef(false);
   const snapshotRef = useRef<AppStateSnapshot | null>(null);
 
   useEffect(() => {
@@ -374,7 +351,7 @@ function App() {
                 setErrorMessage(
                   error instanceof Error
                     ? error.message
-                    : TEXT.cn.errors.updateRuntime,
+                    : TEXT.cn.errors.saveLayout,
                 );
               }
             })
@@ -391,24 +368,6 @@ function App() {
             error instanceof Error ? error.message : TEXT.cn.errors.loadState,
           );
         }
-      });
-
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  useEffect(() => {
-    let active = true;
-
-    isPortableMode()
-      .then((portable) => {
-        if (active) {
-          setIsPortable(portable);
-        }
-      })
-      .catch(() => {
-        // Portable detection is a convenience for update flow, not startup-critical.
       });
 
     return () => {
@@ -614,18 +573,6 @@ function App() {
   const resolvedTheme = resolveTheme(themeMode, systemTheme);
   const ui = TEXT[language];
   const hasLoadedSnapshot = Boolean(snapshot);
-  const isAvailableUpdateDismissed =
-    Boolean(availableUpdate) &&
-    dismissedUpdateVersion === availableUpdate?.version;
-  // The latest released version: the newer one when an update is available,
-  // otherwise the current build once a check confirms we're up to date.
-  const latestVersionLabel = availableUpdate
-    ? availableUpdate.version
-    : updateStatus === "current"
-      ? APP_VERSION
-      : null;
-  const hasActionableUpdate =
-    Boolean(availableUpdate) && !isAvailableUpdateDismissed;
   const visibleTabs = useMemo(
     () =>
       machineRole === "client"
@@ -741,53 +688,6 @@ function App() {
   }, [resolvedTheme, themeMode]);
 
   useEffect(() => {
-    if (!hasLoadedSnapshot || !isTauri() || startupUpdateCheckStarted.current) {
-      return;
-    }
-
-    let active = true;
-    const timerId = window.setTimeout(() => {
-      if (!active || startupUpdateCheckStarted.current) {
-        return;
-      }
-
-      startupUpdateCheckStarted.current = true;
-      checkForAppUpdate()
-        .then((result) => {
-          if (!active) {
-            return;
-          }
-
-          if (!result.available || !result.update) {
-            // Up to date: the updater returns nothing, so the current build is
-            // the latest release. Record that so "Latest version" can show it.
-            setAvailableUpdate(null);
-            setUpdateStatus("current");
-            return;
-          }
-
-          setAvailableUpdate(result.update);
-          if (dismissedUpdateVersion === result.update.version) {
-            setUpdateStatus("idle");
-            setUpdateMessage(ui.settings.updateDismissed);
-            return;
-          }
-
-          setUpdateStatus("available");
-          setUpdateMessage(`${ui.settings.updateAvailable}: v${result.update.version}`);
-        })
-        .catch(() => {
-          // Startup checks should not interrupt normal app startup.
-        });
-    }, 1200);
-
-    return () => {
-      active = false;
-      window.clearTimeout(timerId);
-    };
-  }, [dismissedUpdateVersion, hasLoadedSnapshot, ui]);
-
-  useEffect(() => {
     if (!isPerformanceActive) {
       return;
     }
@@ -852,7 +752,7 @@ function App() {
       setDiagnosticInfo(await readDiagnosticInfo());
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
     } finally {
       setIsDiagnosticPending(false);
@@ -887,7 +787,7 @@ function App() {
       await openLogDirectory();
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
     } finally {
       setIsDiagnosticPending(false);
@@ -1109,7 +1009,7 @@ function App() {
       );
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
     } finally {
       setIsRuntimePending(false);
@@ -1143,7 +1043,7 @@ function App() {
       updateInputServiceStatus(await readInputServiceStatus());
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
     } finally {
       setIsInputServicePending(false);
@@ -1158,7 +1058,7 @@ function App() {
       setInputServiceAction(null);
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
     } finally {
       setIsInputServicePending(false);
@@ -1173,7 +1073,7 @@ function App() {
       setInputServiceAction(null);
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
     } finally {
       setIsInputServicePending(false);
@@ -1523,7 +1423,7 @@ function App() {
       await restartAsAdmin();
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
       setIsAdminRestartPending(false);
     }
@@ -1536,7 +1436,7 @@ function App() {
       await relaunchApp();
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
       setIsAppRelaunchPending(false);
     }
@@ -1582,7 +1482,7 @@ function App() {
       setAutostartEnabled(next);
     } catch (error: unknown) {
       setErrorMessage(
-        error instanceof Error ? error.message : ui.errors.updateRuntime,
+        error instanceof Error ? error.message : ui.errors.saveLayout,
       );
     }
   }
@@ -1763,84 +1663,6 @@ function App() {
 
   function openRepository() {
     void openRepositoryUrl();
-  }
-
-  async function checkDesktopUpdate() {
-    if (!isTauri()) {
-      setUpdateStatus("current");
-      setAvailableUpdate(null);
-      setUpdateMessage(ui.settings.updatesBrowserCopy);
-      return;
-    }
-
-    setUpdateStatus("checking");
-    setUpdateMessage(null);
-
-    try {
-      const result = await checkForAppUpdate();
-
-      if (result.available && result.update) {
-        localStorage.removeItem(UPDATE_DISMISSED_VERSION_KEY);
-        setDismissedUpdateVersion(null);
-        setAvailableUpdate(result.update);
-        setUpdateStatus("available");
-        setUpdateMessage(`${ui.settings.updateAvailable}: v${result.update.version}`);
-        return;
-      }
-
-      setAvailableUpdate(null);
-      setUpdateStatus("current");
-      setUpdateMessage(ui.settings.updateCurrent);
-    } catch (error: unknown) {
-      setUpdateStatus("error");
-      setUpdateMessage(formatUnknownError(error, ui.errors.checkUpdate));
-    }
-  }
-
-  async function installDesktopUpdate() {
-    if (!availableUpdate || updateStatus === "installing") {
-      return;
-    }
-
-    setUpdateStatus("installing");
-    setUpdateMessage(`${ui.settings.updateInstalling}: v${availableUpdate.version}`);
-
-    try {
-      if (isPortable) {
-        await openUpdateReleasePage();
-        setUpdateStatus("available");
-        setUpdateMessage(ui.settings.portableUpdateCopy);
-        return;
-      }
-
-      await installAppUpdate();
-    } catch (error: unknown) {
-      await openUpdateReleasePage().catch(() => {
-        // The original update error is more useful than a secondary browser error.
-      });
-      const errorText = formatUpdaterError(
-        error,
-        ui.errors.installUpdate,
-        ui.errors.updateSignatureMismatch,
-      );
-      setUpdateStatus("error");
-      setUpdateMessage(`${errorText} ${ui.settings.updateFallback}`);
-    }
-  }
-
-  function dismissDesktopUpdate() {
-    if (!availableUpdate) {
-      return;
-    }
-
-    localStorage.setItem(UPDATE_DISMISSED_VERSION_KEY, availableUpdate.version);
-    setDismissedUpdateVersion(availableUpdate.version);
-    setUpdateStatus("idle");
-    setUpdateMessage(ui.settings.updateDismissed);
-  }
-
-  function openUpdateDownloads() {
-    void openUpdateReleasePage();
   }
 
   function renderErrorDialog(message: string) {
@@ -2082,17 +1904,6 @@ function App() {
           <div className="brand-copy">
             <div className="brand-title-row">
               <strong>MyKVM</strong>
-              {hasActionableUpdate && availableUpdate ? (
-                <button
-                  type="button"
-                  className="brand-update-badge"
-                  onClick={() => setActiveTab("settings")}
-                  title={`${ui.settings.updateAvailable}: v${availableUpdate.version}`}
-                  aria-label={`${ui.settings.updateAvailable}: v${availableUpdate.version}`}
-                >
-                  <DownloadIcon />
-                </button>
-              ) : null}
             </div>
             <span className="brand-subtitle">
               {roleLabel} · {runtimeStateLabel} · {onlineDeviceCount}/
@@ -2841,90 +2652,6 @@ function App() {
                 ) : null}
               </section>
 
-              <section className="surface-card settings-card update-card">
-                <div className="card-title-row">
-                  <h2>{ui.settings.updates}</h2>
-                  <span className={`update-status-badge ${updateStatus}`}>
-                    {updateStatusLabel(updateStatus, ui)}
-                  </span>
-                </div>
-                <p className="muted-copy">
-                  {isTauri()
-                    ? isPortable
-                      ? ui.settings.portableUpdateCopy
-                      : ui.settings.updatesCopy
-                    : ui.settings.updatesBrowserCopy}
-                </p>
-                <dl className="network-meta compact-meta">
-                  <div>
-                    <dt>{ui.settings.currentVersion}</dt>
-                    <dd>v{APP_VERSION}</dd>
-                  </div>
-                  <div>
-                    <dt>{ui.settings.latestVersion}</dt>
-                    <dd>
-                      {latestVersionLabel ? `v${latestVersionLabel}` : "--"}
-                    </dd>
-                  </div>
-                </dl>
-                {updateMessage ? (
-                  <p className={`muted-copy update-message ${updateStatus}`}>
-                    {updateMessage}
-                  </p>
-                ) : null}
-                <div className="inline-actions">
-                  <button
-                    type="button"
-                    className="secondary-button compact-button"
-                    onClick={() => void checkDesktopUpdate()}
-                    disabled={
-                      updateStatus === "checking" ||
-                      updateStatus === "installing"
-                    }
-                  >
-                    {updateStatus === "checking"
-                      ? ui.settings.checkingUpdate
-                      : ui.settings.checkUpdate}
-                  </button>
-                  <button
-                    type="button"
-                    className="primary-button compact-button"
-                    onClick={() => void installDesktopUpdate()}
-                    disabled={
-                      !availableUpdate ||
-                      updateStatus === "checking" ||
-                      updateStatus === "installing"
-                    }
-                  >
-                    {updateStatus === "installing"
-                      ? ui.settings.installingUpdate
-                      : ui.settings.installUpdate}
-                  </button>
-                  {availableUpdate ? (
-                    <button
-                      type="button"
-                      className="secondary-button compact-button"
-                      onClick={dismissDesktopUpdate}
-                      disabled={
-                        isAvailableUpdateDismissed ||
-                        updateStatus === "checking" ||
-                        updateStatus === "installing"
-                      }
-                    >
-                      {ui.settings.dismissUpdate}
-                    </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="secondary-button compact-button"
-                    onClick={openUpdateDownloads}
-                    disabled={updateStatus === "installing"}
-                  >
-                    {ui.settings.openReleases}
-                  </button>
-                </div>
-              </section>
-
               <section className="surface-card performance-card">
                 <div className="card-title-row">
                   <h2>{ui.settings.performance}</h2>
@@ -3414,21 +3141,6 @@ function PlayIcon() {
   );
 }
 
-function DownloadIcon() {
-  return (
-    <svg className="runtime-icon" viewBox="0 0 24 24" aria-hidden="true">
-      <path
-        fill="currentColor"
-        d="M12 3a1 1 0 0 1 1 1v8.59l2.3-2.3a1 1 0 1 1 1.4 1.42l-4 4a1 1 0 0 1-1.4 0l-4-4a1 1 0 1 1 1.4-1.42l2.3 2.3V4a1 1 0 0 1 1-1Z"
-      />
-      <path
-        fill="currentColor"
-        d="M5 18a1 1 0 0 1 1 1v1h12v-1a1 1 0 1 1 2 0v1.2A1.8 1.8 0 0 1 18.2 22H5.8A1.8 1.8 0 0 1 4 20.2V19a1 1 0 0 1 1-1Z"
-      />
-    </svg>
-  );
-}
-
 function StopIcon() {
   return (
     <svg className="runtime-icon" viewBox="0 0 24 24" aria-hidden="true">
@@ -3745,23 +3457,6 @@ function formatFileTransferBytes(bytes: number) {
   return `${bytes} B`;
 }
 
-function updateStatusLabel(status: UpdateStatus, ui: AppText) {
-  switch (status) {
-    case "checking":
-      return ui.settings.updateChecking;
-    case "available":
-      return ui.settings.updateAvailable;
-    case "current":
-      return ui.settings.updateCurrent;
-    case "installing":
-      return ui.settings.updateInstalling;
-    case "error":
-      return ui.settings.updateFailed;
-    default:
-      return ui.settings.updateIdle;
-  }
-}
-
 function formatUnknownError(error: unknown, fallback: string) {
   if (error instanceof Error && error.message.trim()) {
     return error.message;
@@ -3776,17 +3471,6 @@ function formatUnknownError(error: unknown, fallback: string) {
   } catch {
     return fallback;
   }
-}
-
-function formatUpdaterError(
-  error: unknown,
-  fallback: string,
-  signatureMismatch: string,
-) {
-  const message = formatUnknownError(error, fallback);
-  return /different key|signature.*key/i.test(message)
-    ? signatureMismatch
-    : message;
 }
 
 function uniqueScreenId(

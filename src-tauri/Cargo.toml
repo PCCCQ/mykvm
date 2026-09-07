@@ -1,10 +1,10 @@
 [package]
 name = "mykvm"
 version = "0.1.0"
-description = "A cross-platform software KVM prototype"
+description = "One keyboard, one mouse, one clipboard across your Mac, Windows, and Linux machines on the same LAN"
 authors = ["XxMinor"]
 license = "MIT"
-repository = "https://github.com/XxMinor/mykvm"
+repository = "https://github.com/PCCCQ/mykvm"
 edition = "2021"
 rust-version = "1.77.2"
 default-run = "mykvm"
@@ -34,7 +34,6 @@ serde = { version = "1.0", features = ["derive"] }
 log = "0.4"
 tauri = { version = "2.11", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-log = "2"
-tauri-plugin-updater = "2.10.1"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-autostart = "2"
 arboard = "3.6.1"
@@ -55,3 +54,10 @@ core-graphics = { version = "0.25", features = ["highsierra"] }
 windows-service = "0.8.1"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Security_Authorization", "Win32_Storage_FileSystem", "Win32_System_DataExchange", "Win32_System_IO", "Win32_System_LibraryLoader", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_Pipes", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_RemoteDesktop", "Win32_System_Services", "Win32_System_StationsAndDesktops", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
 image = { version = "0.25", default-features = false, features = ["bmp"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# X11 backend for Linux input sharing: pure-Rust X protocol client (no
+# libX11/libXtst dev packages needed at build time). xfixes hides the cursor
+# while a remote screen is controlled and xtest injects synthetic input on the
+# receiving side.
+x11rb = { version = "0.13", features = ["xfixes", "xtest", "allow-unsafe-code"] }

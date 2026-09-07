@@ -24,6 +24,8 @@ use tauri_plugin_global_shortcut::{GlobalShortcutExt, ShortcutState};
 
 mod clipboard;
 mod input;
+#[cfg(target_os = "linux")]
+mod linux_input;
 mod performance;
 mod quic_transport;
 pub mod shared_input;
@@ -41,8 +43,7 @@ const TRANSPORT_PORT_MAX: u16 = 65_535;
 // ports starting from the configured base, so two peers that landed on different
 // ports (e.g. 47833 and 47834) still reach each other.
 const DISCOVERY_PORT_SPAN: u16 = 8;
-const REPOSITORY_URL: &str = "https://github.com/XxMinor/mykvm";
-const RELEASES_URL: &str = "https://github.com/XxMinor/mykvm/releases/latest";
+const REPOSITORY_URL: &str = "https://github.com/PCCCQ/mykvm";
 const DISCOVERY_PROTOCOL: &str = "mykvm.discovery.v1";
 // UDP discovery is a heartbeat, not the transport itself. Keep peers through
 // short announce gaps so online clients do not flicker offline in the UI.
@@ -2200,11 +2201,6 @@ fn read_performance_sample(state: tauri::State<'_, AppRuntime>) -> PerformanceSa
 }
 
 #[tauri::command]
-fn set_app_upgrading(state: tauri::State<'_, AppRuntime>, enabled: bool) {
-    state.upgrading.store(enabled, Ordering::Relaxed);
-}
-
-#[tauri::command]
 async fn scan_lan_peers(state: tauri::State<'_, AppRuntime>) -> Result<DiscoveryStatus, String> {
     state.start_discovery()?;
     let layout = state
@@ -2393,11 +2389,6 @@ fn is_autostart_enabled(app: AppHandle) -> Result<bool, String> {
 #[tauri::command]
 fn open_repository_url() -> Result<(), String> {
     open_external_url(REPOSITORY_URL)
-}
-
-#[tauri::command]
-fn open_releases_url() -> Result<(), String> {
-    open_external_url(RELEASES_URL)
 }
 
 #[tauri::command]
@@ -2817,12 +2808,6 @@ pub fn run() {
         })
         .setup(|app| {
             let silent_launch = launched_from_autostart();
-            if let Err(error) = app
-                .handle()
-                .plugin(tauri_plugin_updater::Builder::new().build())
-            {
-                eprintln!("failed to initialize updater plugin: {error}");
-            }
             app.handle().plugin(
                 tauri_plugin_log::Builder::default()
                     .level(log::LevelFilter::Info)
@@ -2919,7 +2904,6 @@ pub fn run() {
             read_clipboard_text,
             write_clipboard_text,
             read_performance_sample,
-            set_app_upgrading,
             scan_lan_peers,
             probe_lan_peer,
             request_lan_pairing,
@@ -2940,7 +2924,6 @@ pub fn run() {
             toggle_maximize_main_window,
             start_window_drag,
             open_repository_url,
-            open_releases_url,
             is_portable_mode
         ])
         .build(tauri::generate_context!())
@@ -3443,10 +3426,10 @@ fn install_windows_input_service(helper_path: &PathBuf) -> Result<(), String> {
         let _service = ServiceHandleGuard(service);
 
         // Let the logged-in (Authenticated) user stop/start this LocalSystem
-        // service, so the per-user (non-elevated) updater can restart it during
-        // upgrades without a UAC prompt — important for an unattended client.
-        // SYSTEM and Administrators keep full control; AU only gains
-        // start/stop/query. Best-effort: failure just leaves the default DACL.
+        // service, so an unattended per-user process can restart it without a
+        // UAC prompt. SYSTEM and Administrators keep full control; AU only
+        // gains start/stop/query. Best-effort: failure just leaves the default
+        // DACL.
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         let sddl = "D:(A;;CCLCSWRPWPDTLOCRRC;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWRPWPLORC;;;AU)S:(AU;FA;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;WD)";
@@ -4042,6 +4025,8 @@ pub(crate) fn current_platform() -> &'static str {
         "windows"
     } else if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(target_os = "linux") {
+        "linux"
     } else {
         "unknown"
     }
@@ -5754,6 +5739,8 @@ fn normalize_peer_platform(platform: &str) -> &'static str {
         "windows"
     } else if platform.eq_ignore_ascii_case("macos") {
         "macos"
+    } else if platform.eq_ignore_ascii_case("linux") {
+        "linux"
     } else {
         "unknown"
     }
