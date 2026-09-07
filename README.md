@@ -10,6 +10,28 @@
 
 [English README](./README.en.md)
 
+## 与原版的区别与联系
+
+**本项目源自开源项目 [XxMinor/mykvm](https://github.com/XxMinor/mykvm)(原版 MyKVM,作者 XxMinor,MIT 许可),在原版基础上进行了重制与扩展。** 承袭了原版的核心设计,大部分行为与协议保持兼容:
+
+- 一套键鼠、一份剪贴板在 macOS / Windows / Linux 之间局域网内共用;
+- Rust + Tauri 架构,每台机器一个轻量托盘应用;
+- 输入与剪贴板走加密 QUIC/TLS 传输,钉扎对端广播的证书;
+- 双通道协议:发现 UDP `47833`,输入/剪贴板 UDP `47834`;
+- 服务端/客户端模式、多显示器布局、剪贴板文本与图片同步、简体中文/英文双语界面。
+
+与[原版](https://github.com/XxMinor/mykvm)相比,本版的主要区别:
+
+| 方面 | 原版 | 本版 |
+| --- | --- | --- |
+| Linux 输入共享 | 仅剪贴板同步 | 完整支持:**控制端**(X11 指针/键盘抓取,贴边吸附、快捷键切屏、多屏漫游)与**被控端**(XTEST 输入注入);要求 X11/Xorg 会话,Wayland 原生会话给出明确报错 |
+| 应用更新 | 应用内检查更新并自动安装(更新面板、标题栏徽标) | 已移除;升级需从 [Releases](https://github.com/PCCCQ/mykvm/releases) 手动下载新安装包 |
+| 发布流程 | 草稿预创建、并行构建、更新器清单(`latest.json`)与签名校验 | 主分支推送或手动触发,由 GitHub Actions 构建 macOS/Windows/Linux 安装包并发布 GitHub Release |
+| 界面 | 含更新面板与更新徽标 | 移除更新相关界面与逻辑,控制台精简 |
+| 文档 | 简短,英文为主 | 重写,中文(默认)/英文双语 |
+
+> 注:Linux 输入共享基于纯 Rust 的 x11rb 客户端实现,构建时无需系统 libX11/libXtst 开发包。
+
 ## 为什么选择 MyKVM
 
 - **真正的跨平台控制。** macOS、Windows、Linux 机器之间共享一套键鼠，双向可用。

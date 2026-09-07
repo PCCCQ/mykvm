@@ -10,6 +10,28 @@ Move your cursor off the edge of one screen and it lands on the next machine. Yo
 
 [中文说明](./README.md)
 
+## Relationship to the Original Project
+
+**This project originates from the open-source project [XxMinor/mykvm](https://github.com/XxMinor/mykvm) (the original MyKVM, by XxMinor, MIT licensed), reworked and extended on top of it.** It inherits the original's core design, and most behavior and the protocol remain compatible:
+
+- One keyboard, one mouse, one clipboard shared between macOS / Windows / Linux machines on the same LAN;
+- Rust + Tauri architecture, one small tray app per machine;
+- Input and clipboard over an encrypted QUIC/TLS transport, pinned to the peer's advertised certificate;
+- Two-channel protocol: discovery on UDP `47833`, input/clipboard on UDP `47834`;
+- Server/Client modes, multi-monitor layout editing, text + image clipboard sync, bilingual (Simplified Chinese / English) UI.
+
+The main differences from the [original](https://github.com/XxMinor/mykvm):
+
+| Aspect | Original | This version |
+| --- | --- | --- |
+| Linux input sharing | Clipboard only | Full support: **controlling** (X11 pointer/keyboard capture, edge-snap, hotkey switch, multi-screen roaming) and **being controlled** (XTEST input injection); requires an X11/Xorg session, Wayland-native sessions show a clear error |
+| App updates | Checks Releases and updates itself in place (update panel, title-bar badge) | Removed; upgrade by downloading a new installer from [Releases](https://github.com/PCCCQ/mykvm/releases) manually |
+| Release workflow | Draft precreation, parallel builds, updater manifest (`latest.json`) and signing-key checks | Triggered by pushes to main or manually, GitHub Actions builds the macOS/Windows/Linux bundles and publishes a GitHub Release |
+| UI | Included the update panel and update badge | Update-related UI and logic removed, console streamlined |
+| Docs | Brief, English-first | Rewritten, Simplified Chinese (default) / English |
+
+> Note: Linux input sharing is built on the pure-Rust x11rb client, so no system libX11/libXtst dev packages are needed at build time.
+
 ## Why MyKVM
 
 - **True cross-platform control.** macOS, Windows, and Linux machines share one keyboard and mouse, in both directions.
