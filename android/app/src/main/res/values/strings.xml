@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">MyKVM 被控端</string>
+    <string name="notification_channel_name">接收状态</string>
+    <string name="notification_channel_description">键鼠接收服务运行中</string>
+    <string name="notification_title">MyKVM 被控端</string>
+    <string name="notification_idle">正在等待电脑连接</string>
+    <string name="notification_paired">已连接：%1$s</string>
+</resources>

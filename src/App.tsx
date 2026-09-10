@@ -98,6 +98,8 @@ const DEVICE_COLORS = [
 const PLATFORM_LABELS = {
   windows: "Windows",
   macos: "macOS",
+  linux: "Linux",
+  android: "Android",
   unknown: "Unknown",
 } as const;
 const WORKSPACE_TABS = [
@@ -3563,7 +3565,12 @@ function sanitizeId(value: string) {
 }
 
 function normalizePlatform(platform: string): Platform {
-  if (platform === "windows" || platform === "macos") {
+  if (
+    platform === "windows" ||
+    platform === "macos" ||
+    platform === "linux" ||
+    platform === "android"
+  ) {
     return platform;
   }
 

@@ -50,6 +50,13 @@
 4. **排布屏幕。** 打开 **布局**，把显示器拖到与实际桌面一致的贴合位置。
 5. **跨界。** 把光标推过共享边缘 —— 它会落到另一台机器上。键盘跟随，剪切粘贴双向可用。
 
+## Android 被控端
+
+Android 手机/平板可以作为 **被控端**，用电脑的鼠标和键盘直接操作它。
+仅接收，不控制其他设备；需要安装 [Shizuku](https://shizuku.rikka.app/)（无 root 时注入键盘的唯一途径），支持 USB 有线与 Wi-Fi 两种连接方式。
+
+详见 [`android/README.md`](./android/README.md)。
+
 ## 权限说明
 
 - **macOS（服务端）。** 在 系统设置 → 隐私与安全性 中给 MyKVM 同时授予 **辅助功能（Accessibility）** 和 **输入监控（Input Monitoring）**，这是捕获和注入键鼠输入所必需的。
@@ -209,6 +216,8 @@ git push origin main
 | `src-tauri/src/input.rs` | 输入捕获、转发和注入运行时 |
 | `src-tauri/src/linux_input.rs` | Linux X11 后端：指针/键盘捕获、键位表翻译、XTEST 注入 |
 | `src-tauri/src/quic_transport.rs` | 加密 QUIC 传输（输入数据报、剪贴板流）与证书钉扎 |
+| `android/rust/` | Android 被控端的协议核心（Rust → `libmykvm_core.so`） |
+| `android/app/` | Android 被控端界面与注入（Kotlin + Compose + Shizuku） |
 | `scripts/` | 开发与构建辅助脚本 |
 
 ## 贡献

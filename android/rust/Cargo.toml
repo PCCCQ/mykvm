@@ -1,0 +1,37 @@
+[package]
+name = "mykvm-receiver"
+version = "0.1.0"
+edition = "2021"
+description = "MyKVM Android receiver core: discovery + QUIC input plane"
+license = "MIT"
+publish = false
+
+# Standalone workspace: this crate is built with the Android NDK, not by the
+# desktop workspace in src-tauri/.
+[workspace]
+
+[lib]
+name = "mykvm_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+rmp-serde = "1"
+log = "0.4"
+android_logger = "0.15"
+ring = "0.17.14"
+quinn = "0.11"
+rcgen = "0.13"
+base64 = "0.22"
+socket2 = "0.6"
+if-addrs = "0.13"
+tokio = { version = "1.52", features = ["rt-multi-thread", "io-util", "sync", "time"] }
+jni = "0.21"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

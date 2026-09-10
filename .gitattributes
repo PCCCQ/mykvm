@@ -6,3 +6,8 @@ src-tauri/tauri*.conf.json text eol=lf
 *.json text eol=lf
 *.md text eol=lf
 .github/workflows/*.yml text eol=lf
+
+# Shell scripts stop being executable if they pick up CRLF, so pin them to LF
+# regardless of the checkout platform.
+*.sh text eol=lf
+android/gradlew text eol=lf

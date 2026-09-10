@@ -1,0 +1,11 @@
+# Gradle / Android build outputs
+.gradle/
+build/
+local.properties
+*.iml
+
+# Rust build outputs
+rust/target/
+
+# The .so files are produced by `:app:buildRustCore`, not checked in.
+app/src/main/jniLibs/

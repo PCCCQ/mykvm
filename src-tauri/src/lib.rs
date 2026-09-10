@@ -5741,6 +5741,11 @@ fn normalize_peer_platform(platform: &str) -> &'static str {
         "macos"
     } else if platform.eq_ignore_ascii_case("linux") {
         "linux"
+    } else if platform.eq_ignore_ascii_case("android") {
+        // Android receivers only ever act as a controlled device, but the
+        // label matters: modifier remapping is skipped for non macOS/Windows
+        // targets, which is exactly what an Android receiver wants.
+        "android"
     } else {
         "unknown"
     }
