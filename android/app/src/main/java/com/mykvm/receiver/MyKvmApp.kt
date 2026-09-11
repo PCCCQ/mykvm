@@ -26,10 +26,9 @@ class MyKvmApp : Application() {
                 connectedController = prefs.controllerName,
             )
         }
-        // Recover from a previous run that was killed while the IME was suppressed.
-        if (prefs.suppressedIme != null) {
-            com.mykvm.receiver.input.ImeSuppressor.restore(this, prefs)
-        }
+        // Recover from a previous run that died while keyboard passthrough was on:
+        // the default input method would still point at the placeholder.
+        com.mykvm.receiver.input.ImeSuppressor.repairIfNeeded(this, prefs)
 
         ShizukuStatus.refresh(this)
     }

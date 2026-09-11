@@ -54,6 +54,7 @@ fun ReceiverScreen(
     onCursorSizeChange: (Int) -> Unit,
     onKeyboardPassthroughChange: (Boolean) -> Unit,
     onClipboardSyncChange: (Boolean) -> Unit,
+    onRestoreIme: () -> Unit,
     onUnpair: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -121,7 +122,7 @@ fun ReceiverScreen(
 
         InputModeCard(state.inputMode, onModeChange)
         CursorSizeCard(state.cursorSizeDp, onCursorSizeChange)
-        KeyboardCard(state, onKeyboardPassthroughChange)
+KeyboardCard(state, onKeyboardPassthroughChange, onRestoreIme)
         ClipboardCard(state.clipboardSync, onClipboardSyncChange)
 
         PairingCard(state, onUnpair)
@@ -254,7 +255,11 @@ private fun ClipboardCard(enabled: Boolean, onChange: (Boolean) -> Unit) {
 }
 
 @Composable
-private fun KeyboardCard(state: ReceiverUiState, onChange: (Boolean) -> Unit) {
+private fun KeyboardCard(
+    state: ReceiverUiState,
+    onChange: (Boolean) -> Unit,
+    onRestoreIme: () -> Unit,
+) {
     Card(
         colors = CardDefaults.cardColors(containerColor = CardColor),
         shape = RoundedCornerShape(14.dp),
@@ -280,6 +285,17 @@ private fun KeyboardCard(state: ReceiverUiState, onChange: (Boolean) -> Unit) {
                     )
                 }
                 Switch(checked = state.keyboardPassthrough, onCheckedChange = onChange)
+            }
+            if (state.keyboardPassthrough) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "接管期间平板的输入法列表不受影响，随时可以在平板上切回来。" +
+                        "若异常退出导致平板没键盘，点下面的按钮即可恢复。",
+                    color = Muted,
+                    fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(8.dp))
+                OutlinedButton(onClick = onRestoreIme) { Text("恢复平板输入法") }
             }
             if (state.keyboardPassthrough && !state.imePermission) {
                 Spacer(Modifier.height(10.dp))

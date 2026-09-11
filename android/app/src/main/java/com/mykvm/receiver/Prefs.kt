@@ -49,14 +49,6 @@ class Prefs(context: Context) {
         set(value) = store.edit().putString(KEY_INPUT_MODE, value.key).apply()
 
     /**
-     * On-screen pointer size in dp. The default matches the old hardcoded
-     * 48px on a 340dpi panel, rounded to a friendlier number.
-     */
-    /**
-     * Suppress the tablet's own IME while the receiver runs, so injected keys
-     * reach the focused app instead of being composed as pinyin.
-     */
-    /**
      * Write clipboard text received from the desktop to the system clipboard.
      * Only this direction: Android 10+ stops a background service from
      * *reading* the clipboard, so tablet -> desktop is not implemented.
@@ -73,16 +65,6 @@ class Prefs(context: Context) {
      * The IME that was active before [keyboardPassthrough] replaced it, kept
      * so it can be restored even after a crash.
      */
-    /** `enabled_input_methods` as it was before suppression. */
-    var suppressedEnabledIms: String?
-        get() = store.getString(KEY_SUPPRESSED_ENABLED_IMS, null)
-        set(value) {
-            val editor = store.edit()
-            if (value == null) editor.remove(KEY_SUPPRESSED_ENABLED_IMS)
-            else editor.putString(KEY_SUPPRESSED_ENABLED_IMS, value)
-            editor.apply()
-        }
-
     var suppressedIme: String?
         get() = store.getString(KEY_SUPPRESSED_IME, null)
         set(value) {
@@ -92,6 +74,10 @@ class Prefs(context: Context) {
             editor.apply()
         }
 
+    /**
+     * On-screen pointer size in dp. The default matches the old hardcoded
+     * 48px on a 340dpi panel, rounded to a friendlier number.
+     */
     var cursorSizeDp: Int
         get() = store.getInt(KEY_CURSOR_SIZE_DP, DEFAULT_CURSOR_SIZE_DP)
         set(value) = store.edit().putInt(KEY_CURSOR_SIZE_DP, value).apply()
@@ -145,7 +131,6 @@ class Prefs(context: Context) {
         const val KEY_KEYBOARD_PASSTHROUGH = "keyboard-passthrough"
         const val KEY_CLIPBOARD_SYNC = "clipboard-sync"
         const val KEY_SUPPRESSED_IME = "suppressed-ime"
-        const val KEY_SUPPRESSED_ENABLED_IMS = "suppressed-enabled-ims"
         const val DEFAULT_CURSOR_SIZE_DP = 28
     }
 }

@@ -47,6 +47,11 @@ class MainActivity : ComponentActivity() {
                         onGrantShizuku = ::requestShizukuPermission,
                         onOpenShizuku = ::openShizukuApp,
                         onGrantOverlay = ::requestOverlayPermission,
+                        onRestoreIme = {
+                            // Safety net: puts a real IME back even if a previous
+                            // run died mid-session.
+                            com.mykvm.receiver.input.ImeSuppressor.restore(this, Prefs(this))
+                        },
                         onClipboardSyncChange = { enabled ->
                             Prefs(this).clipboardSync = enabled
                             ReceiverState.update { it.copy(clipboardSync = enabled) }
