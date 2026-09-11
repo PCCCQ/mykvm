@@ -23,6 +23,8 @@ data class ReceiverUiState(
 
     /** Suppress the tablet IME while running so keys reach the app. */
     val keyboardPassthrough: Boolean = true,
+    /** Mirror clipboard text from the desktop into the system clipboard. */
+    val clipboardSync: Boolean = true,
     /** Whether WRITE_SECURE_SETTINGS has been granted over adb. */
     val imePermission: Boolean = false,
     val deviceName: String = "",

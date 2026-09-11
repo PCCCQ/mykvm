@@ -5,6 +5,8 @@ import android.app.PendingIntent
 import android.app.Service
 import android.content.Context
 import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.net.wifi.WifiManager
@@ -297,6 +299,8 @@ class KvmService : Service() {
 
             "pairingCleared" -> ReceiverState.update { it.copy(pairingCode = null) }
 
+            "clipboardText" -> applyClipboardText(event.optString("text"))
+
             "pairingFailed" -> ReceiverState.update {
                 it.copy(lastError = event.optString("reason"))
             }
@@ -458,6 +462,22 @@ class KvmService : Service() {
     private fun dpToPx(dp: Int): Int {
         val metrics = resources.displayMetrics
         return (dp * metrics.density).toInt().coerceAtLeast(1)
+    }
+
+    /**
+     * Mirrors clipboard text from the desktop. Only this direction: Android
+     * 10+ blocks a background app from reading the clipboard, so sending the
+     * device clipboard back would need an accessibility service.
+     */
+    private fun applyClipboardText(text: String) {
+        if (!prefs.clipboardSync || text.isEmpty()) return
+        try {
+            val clipboard = getSystemService(ClipboardManager::class.java)
+            clipboard.setPrimaryClip(ClipData.newPlainText("MyKVM", text))
+            Log.i(TAG, "clipboard updated (${text.length} chars)")
+        } catch (error: Throwable) {
+            Log.w(TAG, "cannot write clipboard: ${error.message}")
+        }
     }
 
     private fun currentDisplayBounds(): Pair<Int, Int> {

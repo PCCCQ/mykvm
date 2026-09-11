@@ -47,6 +47,10 @@ class MainActivity : ComponentActivity() {
                         onGrantShizuku = ::requestShizukuPermission,
                         onOpenShizuku = ::openShizukuApp,
                         onGrantOverlay = ::requestOverlayPermission,
+                        onClipboardSyncChange = { enabled ->
+                            Prefs(this).clipboardSync = enabled
+                            ReceiverState.update { it.copy(clipboardSync = enabled) }
+                        },
                         onKeyboardPassthroughChange = { enabled ->
                             Prefs(this).keyboardPassthrough = enabled
                             ReceiverState.update { it.copy(keyboardPassthrough = enabled) }

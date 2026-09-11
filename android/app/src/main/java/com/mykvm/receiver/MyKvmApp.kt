@@ -20,6 +20,7 @@ class MyKvmApp : Application() {
                 inputMode = prefs.inputMode,
                 cursorSizeDp = prefs.cursorSizeDp,
                 keyboardPassthrough = prefs.keyboardPassthrough,
+                clipboardSync = prefs.clipboardSync,
                 imePermission = com.mykvm.receiver.input.ImeSuppressor.hasPermission(this),
                 paired = prefs.isPaired,
                 connectedController = prefs.controllerName,

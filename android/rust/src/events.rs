@@ -8,6 +8,8 @@ pub enum ReceiverEvent {
     /// A decoded input event that passed authorization. This is the hot path:
     /// one of these per mouse move.
     Input(InputEvent),
+    /// Clipboard text copied on the desktop; write it to the system clipboard.
+    ClipboardText(String),
     /// A desktop asked to pair; show `code` to the user.
     PairingRequested {
         code: String,

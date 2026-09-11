@@ -56,6 +56,15 @@ class Prefs(context: Context) {
      * Suppress the tablet's own IME while the receiver runs, so injected keys
      * reach the focused app instead of being composed as pinyin.
      */
+    /**
+     * Write clipboard text received from the desktop to the system clipboard.
+     * Only this direction: Android 10+ stops a background service from
+     * *reading* the clipboard, so tablet -> desktop is not implemented.
+     */
+    var clipboardSync: Boolean
+        get() = store.getBoolean(KEY_CLIPBOARD_SYNC, true)
+        set(value) = store.edit().putBoolean(KEY_CLIPBOARD_SYNC, value).apply()
+
     var keyboardPassthrough: Boolean
         get() = store.getBoolean(KEY_KEYBOARD_PASSTHROUGH, true)
         set(value) = store.edit().putBoolean(KEY_KEYBOARD_PASSTHROUGH, value).apply()
@@ -134,6 +143,7 @@ class Prefs(context: Context) {
         const val KEY_INPUT_MODE = "input-mode"
         const val KEY_CURSOR_SIZE_DP = "cursor-size-dp"
         const val KEY_KEYBOARD_PASSTHROUGH = "keyboard-passthrough"
+        const val KEY_CLIPBOARD_SYNC = "clipboard-sync"
         const val KEY_SUPPRESSED_IME = "suppressed-ime"
         const val KEY_SUPPRESSED_ENABLED_IMS = "suppressed-enabled-ims"
         const val DEFAULT_CURSOR_SIZE_DP = 28

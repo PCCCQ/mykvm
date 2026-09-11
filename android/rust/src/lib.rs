@@ -235,6 +235,10 @@ pub extern "system" fn Java_com_mykvm_receiver_core_NativeCore_nativePoll<'local
             "requesterIp": requester_ip,
             "expiresAtMs": expires_at_ms,
         }),
+        ReceiverEvent::ClipboardText(text) => serde_json::json!({
+            "type": "clipboardText",
+            "text": text,
+        }),
         ReceiverEvent::PairingCleared => serde_json::json!({ "type": "pairingCleared" }),
         ReceiverEvent::Paired {
             controller_id,

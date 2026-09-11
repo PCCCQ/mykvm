@@ -29,6 +29,7 @@ use mykvm_core::discovery::{
     decode_discovery_packet, encode_discovery_payload, local_peer_id, peer_from_discovery_packet,
 };
 use mykvm_core::packet::{
+    ClipboardPacket, CLIPBOARD_PROTOCOL,
     DiscoveryPacket, DiscoveryPairingFields, InputEvent, InputPacket, LanPeer, LanPeerScreen,
     MouseButton, DISCOVERY_PORT, INPUT_PROTOCOL, PROTOCOL_VERSION,
 };
@@ -43,7 +44,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
         eprintln!(
-            "usage: live_controller <pair-request|pair-confirm|move|click|rclick|mclick|scroll|key|trace|status> <host> [args...]"
+            "usage: live_controller <pair-request|pair-confirm|move|click|rclick|mclick|scroll|key|combo|trace|clip|status> <host> [args...]"
         );
         std::process::exit(2);
     }
@@ -92,6 +93,23 @@ fn main() {
             send_key(&host, &state_dir, &state, vk)
         }
         "trace" => trace(&host, &state_dir, &state),
+        "combo" => {
+            // Two key codes: hold the first, press the second (e.g. Ctrl+V).
+            let m = rest.first()
+                .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0x11);
+            let k = rest.get(1)
+                .and_then(|v| u16::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0x56);
+            send_combo(&host, &state_dir, &state, m, k)
+        }
+        "clip" => {
+            let text = rest
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "hello from the desktop".into());
+            send_clipboard(&host, &state_dir, &state, &text)
+        }
 
         "status" => {
             println!("{}", state.describe());
@@ -183,6 +201,64 @@ fn send_key(host: &str, dir: &PathBuf, state: &LiveState, vk: u16) -> Result<(),
             },
         ],
     )
+}
+
+/// Holds [modifier], taps [keyCode], releases the modifier -- all in one batch.
+fn send_combo(
+    host: &str,
+    dir: &PathBuf,
+    state: &LiveState,
+    modifier: u16,
+    key_code: u16,
+) -> Result<(), String> {
+    send_events(
+        host,
+        dir,
+        state,
+        &[
+            InputEvent::Key { key_code: modifier, down: true },
+            InputEvent::Key { key_code, down: true },
+            InputEvent::Key { key_code, down: false },
+            InputEvent::Key { key_code: modifier, down: false },
+        ],
+    )
+}
+
+/// Sends one clipboard text payload over the reliable stream.
+fn send_clipboard(
+    host: &str,
+    dir: &PathBuf,
+    state: &LiveState,
+    text: &str,
+) -> Result<(), String> {
+    if state.receiver_public_key.is_empty() {
+        return Err("run pair-request first".into());
+    }
+    let (transport, _rx) = start_transport(dir)?;
+    let addr = format!("{}:{}", strip_port(host), state.receiver_quic_port);
+    let peer = transport.peer(
+        addr.clone(),
+        state.receiver_public_key.clone(),
+        PROTOCOL_VERSION,
+    );
+
+    let packet = ClipboardPacket {
+        protocol: CLIPBOARD_PROTOCOL.into(),
+        origin_id: local_peer_id(CONTROLLER_ID),
+        origin_transport_public_key: transport.public_key().to_string(),
+        target_id: state.receiver_id.clone(),
+        cluster_id: state.cluster_id.clone(),
+        pair_secret: state.pair_secret.clone(),
+        signature: String::new(),
+        formats: Vec::new(),
+        text: text.to_string(),
+        image: None,
+        sequence: 1,
+    };
+    let payload = rmp_serde::to_vec_named(&packet).map_err(|e| e.to_string())?;
+    transport.send_stream_expect_ack(peer, payload)?;
+    println!("sent clipboard ({} chars) to {addr}", text.chars().count());
+    Ok(())
 }
 
 /// Sweeps the cursor across the screen: 60 moves that both warm the connection

@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::discovery::{spawn_discovery, DiscoveryHandle, ReceiverConfig};
 use crate::events::{EventSink, ReceiverEvent};
-use crate::packet::{InputPacket, INPUT_PROTOCOL};
+use crate::packet::{ClipboardPacket, InputPacket, CLIPBOARD_PROTOCOL, INPUT_PROTOCOL};
 use crate::pairing::{complete_pairing_from_confirm, SharedChallenge};
 use crate::state::{input_authorized, now_ms, OriginCache, ReceiverLayout};
 use crate::quic_transport;
@@ -71,7 +71,7 @@ impl Receiver {
             let events = Arc::clone(&on_datagram_events);
             let events_tx = events_tx.clone();
             Arc::new(move |payload: Vec<u8>, _source: SocketAddr| -> bool {
-                handle_pairing_stream(&layout, &challenge, &events, &events_tx, &payload)
+                handle_stream_packet(&layout, &challenge, &events, &events_tx, &payload)
             })
         };
 
@@ -255,6 +255,75 @@ fn handle_input_datagram(
 /// returning `true` is what releases the stream ack. The desktop waits for that
 /// ack and then immediately probes for the peer; if we still advertised
 /// `pairing_required: true` it would report "pairing was not accepted".
+/// Entry point for every QUIC stream the desktop opens.
+///
+/// Two kinds arrive: the encrypted `pair-confirm`, and clipboard updates.
+/// They are told apart by their protocol tag rather than by trying to
+/// decode twice, so a malformed packet cannot be mistaken for the other.
+fn handle_stream_packet(
+    layout: &Arc<Mutex<ReceiverLayout>>,
+    challenge: &SharedChallenge,
+    events: &EventSink,
+    events_tx: &Sender<ReceiverEvent>,
+    payload: &[u8],
+) -> bool {
+    if is_pair_confirm(payload) {
+        return handle_pairing_stream(layout, challenge, events, events_tx, payload);
+    }
+    handle_clipboard_stream(layout, events, payload)
+}
+
+/// Cheap protocol probe so clipboard payloads are not fed to the pairing decoder.
+fn is_pair_confirm(payload: &[u8]) -> bool {
+    rmp_serde::from_slice::<crate::packet::DiscoveryPacket>(payload)
+        .map(|packet| packet.protocol == crate::packet::DISCOVERY_PROTOCOL)
+        .unwrap_or(false)
+}
+
+/// Writes clipboard text received from a paired controller.
+///
+/// Images are not handled yet: the payload is up to 32MB of base64 RGBA and
+/// would have to cross the JNI boundary, so image packets are logged and
+/// dropped rather than half-implemented.
+fn handle_clipboard_stream(
+    layout: &Arc<Mutex<ReceiverLayout>>,
+    events: &EventSink,
+    payload: &[u8],
+) -> bool {
+    let Ok(packet) = rmp_serde::from_slice::<ClipboardPacket>(payload) else {
+        return false;
+    };
+    if packet.protocol != CLIPBOARD_PROTOCOL {
+        return false;
+    }
+
+    let authorized = match layout.lock() {
+        Ok(layout) => crate::state::input_authorized(
+            &layout,
+            &packet.cluster_id,
+            &packet.pair_secret,
+            &packet.origin_transport_public_key,
+            &packet.origin_id,
+        ),
+        Err(_) => false,
+    };
+    if !authorized {
+        log::warn!("clipboard packet rejected from {}", packet.origin_id);
+        return true;
+    }
+
+    if !packet.text.is_empty() {
+        log::info!("clipboard text received ({} chars)", packet.text.chars().count());
+        events(ReceiverEvent::ClipboardText(packet.text));
+        return true;
+    }
+
+    if packet.image.is_some() {
+        log::info!("clipboard image ignored (not supported on Android yet)");
+    }
+    true
+}
+
 fn handle_pairing_stream(
     layout: &Arc<Mutex<ReceiverLayout>>,
     challenge: &SharedChallenge,

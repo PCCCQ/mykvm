@@ -70,6 +70,57 @@ pub struct InputPacket {
 }
 
 // ---------------------------------------------------------------------------
+// Clipboard plane
+// ---------------------------------------------------------------------------
+
+pub const CLIPBOARD_PROTOCOL: &str = "mykvm.clipboard.v1";
+
+/// Mirrors `clipboard::ClipboardImage`. RGBA, base64, row-major.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba_base64: String,
+}
+
+/// Mirrors `lib::ClipboardFormat`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardFormat {
+    pub kind: String,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub image: Option<ClipboardImage>,
+}
+
+/// Mirrors `lib::ClipboardPacket`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardPacket {
+    pub protocol: String,
+    pub origin_id: String,
+    #[serde(default)]
+    pub origin_transport_public_key: String,
+    #[serde(default)]
+    pub target_id: String,
+    #[serde(default)]
+    pub cluster_id: String,
+    #[serde(default)]
+    pub pair_secret: String,
+    #[serde(default)]
+    pub signature: String,
+    #[serde(default)]
+    pub formats: Vec<ClipboardFormat>,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub image: Option<ClipboardImage>,
+    pub sequence: u64,
+}
+
+// ---------------------------------------------------------------------------
 // Discovery plane
 // ---------------------------------------------------------------------------
 

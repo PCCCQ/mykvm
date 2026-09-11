@@ -53,6 +53,7 @@ fun ReceiverScreen(
     onModeChange: (InputMode) -> Unit,
     onCursorSizeChange: (Int) -> Unit,
     onKeyboardPassthroughChange: (Boolean) -> Unit,
+    onClipboardSyncChange: (Boolean) -> Unit,
     onUnpair: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -121,6 +122,7 @@ fun ReceiverScreen(
         InputModeCard(state.inputMode, onModeChange)
         CursorSizeCard(state.cursorSizeDp, onCursorSizeChange)
         KeyboardCard(state, onKeyboardPassthroughChange)
+        ClipboardCard(state.clipboardSync, onClipboardSyncChange)
 
         PairingCard(state, onUnpair)
 
@@ -215,6 +217,38 @@ private fun PrerequisiteCard(
                 Spacer(Modifier.width(12.dp))
                 Button(onClick = onPrimary) { Text(primaryLabel) }
             }
+        }
+    }
+}
+
+@Composable
+private fun ClipboardCard(enabled: Boolean, onChange: (Boolean) -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardColor),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "剪贴板同步",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    "电脑上复制的内容会写入平板剪贴板。" +
+                        "Android 限制后台读取剪贴板，所以平板复制的内容暂时传不回电脑。",
+                    color = Muted,
+                    fontSize = 13.sp,
+                )
+            }
+            Switch(checked = enabled, onCheckedChange = onChange)
         }
     }
 }
