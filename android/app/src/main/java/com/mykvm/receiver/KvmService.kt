@@ -9,7 +9,10 @@ import android.content.pm.ServiceInfo
 import android.content.res.Configuration
 import android.net.wifi.WifiManager
 import android.os.Build
+import android.os.Handler
 import android.os.IBinder
+import android.os.Looper
+import android.os.SystemClock
 import android.os.PowerManager
 import android.provider.Settings
 import android.util.Log
@@ -21,6 +24,7 @@ import com.mykvm.receiver.input.InputDispatcher
 import com.mykvm.receiver.input.ShizukuInjector
 import com.mykvm.receiver.input.VirtualCursor
 import com.mykvm.receiver.input.InputMode
+import com.mykvm.receiver.input.ImeSuppressor
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.util.concurrent.atomic.AtomicBoolean
@@ -34,6 +38,8 @@ import kotlin.concurrent.thread
  * user is not looking at the phone (i.e. the entire point of the app).
  */
 class KvmService : Service() {
+
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     private lateinit var prefs: Prefs
     private lateinit var injector: ShizukuInjector
@@ -75,7 +81,9 @@ class KvmService : Service() {
         super.onCreate()
         prefs = Prefs(this)
         injector = ShizukuInjector()
-        cursor = VirtualCursor(this)
+        // Read the size on the main thread each time the overlay is rebuilt, so
+        // the slider in the UI takes effect without restarting the service.
+        cursor = VirtualCursor(this) { dpToPx(prefs.cursorSizeDp) }
         // The mode is read per event from the shared state, so flipping the
         // switch in the UI takes effect immediately without a restart.
         dispatcher = InputDispatcher(injector, cursor) { ReceiverState.current.inputMode }
@@ -139,6 +147,12 @@ class KvmService : Service() {
 
         startForegroundNotification(getString(R.string.notification_idle))
         acquireLocks()
+
+        // Take the tablet's IME out of the way so injected keys reach the app
+        // instead of being composed. Restored in stopReceiver().
+        if (prefs.keyboardPassthrough) {
+            ImeSuppressor.suppress(this, prefs)
+        }
 
         if (!NativeCore.ensureLoaded()) {
             running.set(false)
@@ -205,6 +219,7 @@ class KvmService : Service() {
         } catch (error: Throwable) {
             Log.w(TAG, "nativeStop failed: ${error.message}")
         }
+        ImeSuppressor.restore(this, prefs)
         releaseLocks()
         ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
         ReceiverState.update {
@@ -212,8 +227,43 @@ class KvmService : Service() {
         }
     }
 
+    /**
+     * Re-advertises the screen after a geometry change by tearing the core down
+     * and starting it again. Done on the main thread because the caller is the
+     * poll thread, which stopReceiver() has to join.
+     */
+    private fun restartForGeometryChange() {
+        mainHandler.post {
+            stopReceiver()
+            startReceiver()
+        }
+    }
+
     private fun pollLoop() {
+        var lastBoundsCheck = SystemClock.elapsedRealtime()
+        var lastBounds = currentDisplayBounds()
+        var lastCursorSizeDp = prefs.cursorSizeDp
+
         while (running.get()) {
+            // PC mode lets the window be dragged and resized, and the display
+            // itself can change; both invalidate the geometry the desktop maps
+            // its cursor into, so re-advertise when it moves.
+            val now = SystemClock.elapsedRealtime()
+            val cursorSizeDp = prefs.cursorSizeDp
+            if (cursorSizeDp != lastCursorSizeDp) {
+                lastCursorSizeDp = cursorSizeDp
+                cursor.refreshAppearance()
+            }
+            if (now - lastBoundsCheck >= BOUNDS_CHECK_INTERVAL_MS) {
+                lastBoundsCheck = now
+                val bounds = currentDisplayBounds()
+                if (bounds != lastBounds) {
+                    Log.i(TAG, "display bounds changed: $lastBounds -> $bounds")
+                    lastBounds = bounds
+                    restartForGeometryChange()
+                    return
+                }
+            }
             val payload = try {
                 NativeCore.nativePoll(POLL_TIMEOUT_MS)
             } catch (error: Throwable) {
@@ -393,10 +443,27 @@ class KvmService : Service() {
     }
 
     /** Full display size in pixels -- the coordinate space touches use. */
+    /**
+     * Full display size in pixels -- the coordinate space touches use.
+     *
+     * Deliberately NOT `currentWindowMetrics`: in the tablet's PC mode the
+     * receiver runs inside a freeform window, so currentWindowMetrics would
+     * report the window (e.g. 1488x1097) and the desktop would map its cursor
+     * into a fraction of the screen. `maximumWindowMetrics` reports the largest
+     * area the app could occupy, which is the display itself -- verified on
+     * device with mMaxBounds=Rect(0,0-2944,1840) while the window sat at
+     * Rect(558,483-2046,1580).
+     */
+    /** dp -> physical pixels, using the display the app is currently on. */
+    private fun dpToPx(dp: Int): Int {
+        val metrics = resources.displayMetrics
+        return (dp * metrics.density).toInt().coerceAtLeast(1)
+    }
+
     private fun currentDisplayBounds(): Pair<Int, Int> {
         return try {
             val windowManager = getSystemService(WindowManager::class.java)
-            val bounds = windowManager.currentWindowMetrics.bounds
+            val bounds = windowManager.maximumWindowMetrics.bounds
             bounds.width() to bounds.height()
         } catch (error: Throwable) {
             val metrics = resources.displayMetrics
@@ -416,6 +483,9 @@ class KvmService : Service() {
         private const val QUIC_PORT = 47834
 
         private const val SCREEN_ID = "android-screen-1"
+
+        /** How often the display geometry is re-checked while running. */
+        private const val BOUNDS_CHECK_INTERVAL_MS = 3000L
 
         const val ACTION_STOP = "com.mykvm.receiver.STOP"
 

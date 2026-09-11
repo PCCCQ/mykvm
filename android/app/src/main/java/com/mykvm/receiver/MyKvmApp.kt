@@ -18,10 +18,18 @@ class MyKvmApp : Application() {
             it.copy(
                 deviceName = prefs.deviceName,
                 inputMode = prefs.inputMode,
+                cursorSizeDp = prefs.cursorSizeDp,
+                keyboardPassthrough = prefs.keyboardPassthrough,
+                imePermission = com.mykvm.receiver.input.ImeSuppressor.hasPermission(this),
                 paired = prefs.isPaired,
                 connectedController = prefs.controllerName,
             )
         }
+        // Recover from a previous run that was killed while the IME was suppressed.
+        if (prefs.suppressedIme != null) {
+            com.mykvm.receiver.input.ImeSuppressor.restore(this, prefs)
+        }
+
         ShizukuStatus.refresh(this)
     }
 

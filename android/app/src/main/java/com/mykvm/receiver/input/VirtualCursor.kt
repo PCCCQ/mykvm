@@ -16,19 +16,27 @@ import android.view.WindowManager
 /**
  * The pointer the user sees on the phone.
  *
- * Android has no system cursor for a touch device, so the receiver draws its
- * own: a small always-on-top window whose *tip* tracks the coordinates the
- * desktop sends. Mouse movement never reaches the injected input stream -- only
- * clicks, drags and scrolls do -- which is what keeps hovering free of jank.
+ * Android has no system cursor for a touch device, and it does not render one
+ * for injected `SOURCE_MOUSE` events either (the pointer controller only follows
+ * real input devices), so the receiver paints its own: a small always-on-top
+ * window whose tip tracks the coordinates the desktop sends. Mouse movement
+ * never reaches the injected input stream -- only clicks, drags and scrolls do,
+ * which is what keeps hovering free of jank.
  *
  * Every WindowManager call and every View construction happens on the main
  * thread. `WindowManager.addView` builds a `ViewRootImpl`, which installs a
  * `Handler` on the calling thread, so calling it from the poll thread fails with
  * "Can't create handler inside thread that has not called Looper.prepare()".
- * Positions are also coalesced: a burst of mouse moves costs one relayout per
+ * Positions are coalesced: a burst of mouse moves costs one relayout per
  * main-thread pass rather than one per event.
+ *
+ * [sizePxProvider] is read on the main thread so the user can resize the cursor
+ * from the UI while the service keeps running.
  */
-class VirtualCursor(private val context: Context) {
+class VirtualCursor(
+    private val context: Context,
+    private val sizePxProvider: () -> Int,
+) {
 
     private val handler = Handler(Looper.getMainLooper())
     private val windowManager = context.getSystemService(WindowManager::class.java)
@@ -36,6 +44,7 @@ class VirtualCursor(private val context: Context) {
     /** Only ever touched on the main thread. */
     private var view: CursorView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
+    private var appliedSizePx = 0
 
     /** Set from the poll thread, consumed on the main thread. */
     @Volatile
@@ -72,6 +81,11 @@ class VirtualCursor(private val context: Context) {
         scheduleApply()
     }
 
+    /** Re-applies the current size, e.g. after the user drags the slider. */
+    fun refreshAppearance() {
+        scheduleApply()
+    }
+
     private fun scheduleApply() {
         if (applyScheduled) return
         applyScheduled = true
@@ -80,16 +94,14 @@ class VirtualCursor(private val context: Context) {
 
     private fun applyOnMainThread() {
         if (!visible) {
-            view?.let { current ->
-                try {
-                    windowManager.removeView(current)
-                } catch (error: Throwable) {
-                    // Already detached.
-                }
-            }
-            view = null
-            layoutParams = null
+            detach()
             return
+        }
+
+        val sizePx = sizePxProvider().coerceIn(MIN_SIZE_PX, MAX_SIZE_PX)
+        // A size change cannot be applied to an existing window, so rebuild it.
+        if (view != null && sizePx != appliedSizePx) {
+            detach()
         }
 
         val x = pendingX
@@ -99,10 +111,10 @@ class VirtualCursor(private val context: Context) {
         if (existing == null) {
             // Constructed here, not in the constructor, so the View (which
             // touches a Handler internally) is always built on the main thread.
-            val created = CursorView(context)
+            val created = CursorView(context, sizePx)
             val params = WindowManager.LayoutParams(
-                SIZE_PX,
-                SIZE_PX,
+                sizePx,
+                sizePx,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
                 WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
                     WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
@@ -120,10 +132,12 @@ class VirtualCursor(private val context: Context) {
                 windowManager.addView(created, params)
                 view = created
                 layoutParams = params
+                appliedSizePx = sizePx
             } catch (error: Throwable) {
                 Log.w(TAG, "cannot show cursor overlay: ${error.message}")
                 view = null
                 layoutParams = null
+                appliedSizePx = 0
             }
             return
         }
@@ -140,11 +154,32 @@ class VirtualCursor(private val context: Context) {
             Log.w(TAG, "cursor overlay lost: ${error.message}")
             view = null
             layoutParams = null
+            appliedSizePx = 0
         }
     }
 
-    /** Draws an arrow whose tip sits at the window's top-left corner. */
-    private class CursorView(context: Context) : View(context) {
+    private fun detach() {
+        view?.let { current ->
+            try {
+                windowManager.removeView(current)
+            } catch (error: Throwable) {
+                // Already detached.
+            }
+        }
+        view = null
+        layoutParams = null
+        appliedSizePx = 0
+    }
+
+    /**
+     * Draws an arrow whose tip sits at the window's top-left corner.
+     *
+     * The path is authored in a 40x40 box and scaled to the requested size, so
+     * the outline stays proportional at any setting.
+     */
+    private class CursorView(context: Context, sizePx: Int) : View(context) {
+
+        private val scale = sizePx / DESIGN_BOX
 
         private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.WHITE
@@ -153,31 +188,42 @@ class VirtualCursor(private val context: Context) {
         private val outline = Paint(Paint.ANTI_ALIAS_FLAG).apply {
             color = Color.argb(220, 0, 0, 0)
             style = Paint.Style.STROKE
-            strokeWidth = 3f
+            strokeWidth = (sizePx / 16f).coerceIn(2f, 6f)
             strokeJoin = Paint.Join.ROUND
         }
         private val arrow = Path().apply {
             moveTo(1f, 1f)
-            lineTo(1f, 30f)
-            lineTo(9f, 23f)
-            lineTo(15f, 35f)
-            lineTo(20f, 32f)
-            lineTo(14f, 21f)
-            lineTo(24f, 20f)
+            lineTo(1f, 34f)
+            lineTo(10f, 26f)
+            lineTo(17f, 40f)
+            lineTo(23f, 37f)
+            lineTo(16f, 24f)
+            lineTo(27f, 22f)
             close()
         }
 
         override fun onDraw(canvas: Canvas) {
             super.onDraw(canvas)
+            canvas.save()
+            canvas.scale(scale, scale)
             canvas.drawPath(arrow, fill)
             canvas.drawPath(arrow, outline)
+            canvas.restore()
         }
     }
 
-    private companion object {
-        const val TAG = "MyKvmCursor"
+    companion object {
+        private const val TAG = "MyKvmCursor"
 
-        /** Generous box: the arrow tip is at (0,0) and the tail extends below. */
-        const val SIZE_PX = 48
+        /** The arrow path above is authored inside this box. */
+        private const val DESIGN_BOX = 40f
+
+        /**
+         * Bounds in pixels, applied after the density conversion done by the
+         * caller. Wide enough to be a useful safety net, narrow enough that a
+         * bad setting cannot cover the screen.
+         */
+        const val MIN_SIZE_PX = 16
+        const val MAX_SIZE_PX = 200
     }
 }

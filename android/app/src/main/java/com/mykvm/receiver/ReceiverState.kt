@@ -18,6 +18,13 @@ data class ReceiverUiState(
     val connectedController: String? = null,
     /** Mouse = native SOURCE_MOUSE events, touch = synthetic touches. */
     val inputMode: InputMode = InputMode.MOUSE,
+    /** On-screen pointer size in dp. */
+    val cursorSizeDp: Int = 28,
+
+    /** Suppress the tablet IME while running so keys reach the app. */
+    val keyboardPassthrough: Boolean = true,
+    /** Whether WRITE_SECURE_SETTINGS has been granted over adb. */
+    val imePermission: Boolean = false,
     val deviceName: String = "",
     val peerId: String? = null,
     val quicPort: Int = 0,

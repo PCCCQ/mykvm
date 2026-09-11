@@ -51,6 +51,8 @@ fun ReceiverScreen(
     onOpenShizuku: () -> Unit,
     onGrantOverlay: () -> Unit,
     onModeChange: (InputMode) -> Unit,
+    onCursorSizeChange: (Int) -> Unit,
+    onKeyboardPassthroughChange: (Boolean) -> Unit,
     onUnpair: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -117,6 +119,8 @@ fun ReceiverScreen(
         )
 
         InputModeCard(state.inputMode, onModeChange)
+        CursorSizeCard(state.cursorSizeDp, onCursorSizeChange)
+        KeyboardCard(state, onKeyboardPassthroughChange)
 
         PairingCard(state, onUnpair)
 
@@ -214,6 +218,89 @@ private fun PrerequisiteCard(
         }
     }
 }
+
+@Composable
+private fun KeyboardCard(state: ReceiverUiState, onChange: (Boolean) -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardColor),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "键盘直通",
+                        color = Color.White,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Medium,
+                    )
+                    Text(
+                        if (state.keyboardPassthrough) {
+                            "已接管平板输入法，键盘直接送入应用"
+                        } else {
+                            "平板的输入法会拦截按键（表现为打不出字）"
+                        },
+                        color = Muted,
+                        fontSize = 13.sp,
+                    )
+                }
+                Switch(checked = state.keyboardPassthrough, onCheckedChange = onChange)
+            }
+            if (state.keyboardPassthrough && !state.imePermission) {
+                Spacer(Modifier.height(10.dp))
+                Text(
+                    "还需一次性授权（用电脑执行一次，之后不用再执行）：",
+                    color = WarnColor,
+                    fontSize = 12.sp,
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "adb shell pm grant com.mykvm.receiver " +
+                        "android.permission.WRITE_SECURE_SETTINGS",
+                    color = Color.White,
+                    fontSize = 11.sp,
+                    fontFamily = FontFamily.Monospace,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CursorSizeCard(current: Int, onChange: (Int) -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardColor),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text("光标大小", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                CURSOR_SIZES.forEach { option ->
+                    ModeButton(
+                        label = option.second,
+                        selected = current == option.first,
+                        onClick = { onChange(option.first) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/** Label + dp pairs offered by the cursor size control. */
+private val CURSOR_SIZES = listOf(
+    20 to "小",
+    28 to "中",
+    40 to "大",
+    56 to "特大",
+)
 
 @Composable
 private fun InputModeCard(current: InputMode, onChange: (InputMode) -> Unit) {

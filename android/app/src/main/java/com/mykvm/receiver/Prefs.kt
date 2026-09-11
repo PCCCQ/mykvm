@@ -48,6 +48,45 @@ class Prefs(context: Context) {
         get() = com.mykvm.receiver.input.InputMode.fromKey(store.getString(KEY_INPUT_MODE, null))
         set(value) = store.edit().putString(KEY_INPUT_MODE, value.key).apply()
 
+    /**
+     * On-screen pointer size in dp. The default matches the old hardcoded
+     * 48px on a 340dpi panel, rounded to a friendlier number.
+     */
+    /**
+     * Suppress the tablet's own IME while the receiver runs, so injected keys
+     * reach the focused app instead of being composed as pinyin.
+     */
+    var keyboardPassthrough: Boolean
+        get() = store.getBoolean(KEY_KEYBOARD_PASSTHROUGH, true)
+        set(value) = store.edit().putBoolean(KEY_KEYBOARD_PASSTHROUGH, value).apply()
+
+    /**
+     * The IME that was active before [keyboardPassthrough] replaced it, kept
+     * so it can be restored even after a crash.
+     */
+    /** `enabled_input_methods` as it was before suppression. */
+    var suppressedEnabledIms: String?
+        get() = store.getString(KEY_SUPPRESSED_ENABLED_IMS, null)
+        set(value) {
+            val editor = store.edit()
+            if (value == null) editor.remove(KEY_SUPPRESSED_ENABLED_IMS)
+            else editor.putString(KEY_SUPPRESSED_ENABLED_IMS, value)
+            editor.apply()
+        }
+
+    var suppressedIme: String?
+        get() = store.getString(KEY_SUPPRESSED_IME, null)
+        set(value) {
+            val editor = store.edit()
+            if (value == null) editor.remove(KEY_SUPPRESSED_IME)
+            else editor.putString(KEY_SUPPRESSED_IME, value)
+            editor.apply()
+        }
+
+    var cursorSizeDp: Int
+        get() = store.getInt(KEY_CURSOR_SIZE_DP, DEFAULT_CURSOR_SIZE_DP)
+        set(value) = store.edit().putInt(KEY_CURSOR_SIZE_DP, value).apply()
+
     var shouldRun: Boolean
         get() = store.getBoolean(KEY_SHOULD_RUN, false)
         set(value) = store.edit().putBoolean(KEY_SHOULD_RUN, value).apply()
@@ -93,5 +132,10 @@ class Prefs(context: Context) {
         const val KEY_CONTROLLER_NAME = "controller-name"
         const val KEY_SHOULD_RUN = "should-run"
         const val KEY_INPUT_MODE = "input-mode"
+        const val KEY_CURSOR_SIZE_DP = "cursor-size-dp"
+        const val KEY_KEYBOARD_PASSTHROUGH = "keyboard-passthrough"
+        const val KEY_SUPPRESSED_IME = "suppressed-ime"
+        const val KEY_SUPPRESSED_ENABLED_IMS = "suppressed-enabled-ims"
+        const val DEFAULT_CURSOR_SIZE_DP = 28
     }
 }

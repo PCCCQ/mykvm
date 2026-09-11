@@ -28,6 +28,13 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         NativeCore.ensureLoaded()
+        val prefs = Prefs(this)
+        ReceiverState.update {
+            it.copy(
+                keyboardPassthrough = prefs.keyboardPassthrough,
+                imePermission = com.mykvm.receiver.input.ImeSuppressor.hasPermission(this),
+            )
+        }
         requestNotificationPermissionIfNeeded()
 
         setContent {
@@ -40,6 +47,20 @@ class MainActivity : ComponentActivity() {
                         onGrantShizuku = ::requestShizukuPermission,
                         onOpenShizuku = ::openShizukuApp,
                         onGrantOverlay = ::requestOverlayPermission,
+                        onKeyboardPassthroughChange = { enabled ->
+                            Prefs(this).keyboardPassthrough = enabled
+                            ReceiverState.update { it.copy(keyboardPassthrough = enabled) }
+                            // Apply immediately: restarting the service is the
+                            // simplest way to re-run the suppress/restore pair.
+                            if (ReceiverState.current.running) {
+                                KvmService.stop(this)
+                                KvmService.start(this)
+                            }
+                        },
+                        onCursorSizeChange = { size ->
+                            Prefs(this).cursorSizeDp = size
+                            ReceiverState.update { it.copy(cursorSizeDp = size) }
+                        },
                         onModeChange = { mode ->
                             // Persist for the next launch and publish immediately:
                             // the dispatcher reads the shared state per event, so
