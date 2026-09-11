@@ -20,18 +20,26 @@ import rikka.shizuku.SystemServiceHelper
  * app, and the KVM requirement is mouse **and keyboard**. Shizuku is the only
  * way to get that without root -- it is exactly what scrcpy relies on.
  *
+ * Two event families live here:
+ *
+ *  * **touch** (`SOURCE_TOUCHSCREEN`) -- synthesised taps and swipes. Works in
+ *    every app, but cannot express hover, a real right-click or a real wheel.
+ *  * **mouse** (`SOURCE_MOUSE`) -- hover moves, per-button press/release and
+ *    `ACTION_SCROLL`. Android's own mouse stack handles these, so mouse-aware
+ *    apps (browsers, office, remote desktop, emulators) behave natively.
+ *
+ * [InputDispatcher] picks between them at runtime.
+ *
  * The binder call is made by hand rather than through a generated AIDL stub:
- * `IInputManager` is a hidden interface, and `injectInputEvent` has been its
- * first declared method for every release we target, so its transaction code is
- * `FIRST_CALL_TRANSACTION`. Avoiding a checked-in copy of the AIDL also avoids
- * it silently drifting from the platform.
+ * `IInputManager` is hidden, and its transaction codes shift between releases
+ * (see [transactionCode]).
  */
 class ShizukuInjector {
 
     @Volatile
     private var wrappedInputService: IBinder? = null
 
-    /** Resolved once from the running framework; see [transactionCode]. */
+    /** Resolved once per process; see [transactionCode]. */
     @Volatile
     private var cachedTransactionCode: Int? = null
 
@@ -70,6 +78,279 @@ class ShizukuInjector {
         wrappedInputService = null
     }
 
+    // -----------------------------------------------------------------------
+    // Mouse events (SOURCE_MOUSE)
+    // -----------------------------------------------------------------------
+
+    /**
+     * Reports the pointer position the way a real mouse does.
+     *
+     * With no button held a real mouse sends `ACTION_HOVER_MOVE`, which is what
+     * drives hover highlights; while dragging it sends `ACTION_MOVE` carrying
+     * the held buttons. Getting this distinction right is the difference
+     * between apps seeing a mouse and seeing a stuck drag.
+     */
+    fun mouseMove(x: Float, y: Float, buttonState: Int, downTime: Long, metaState: Int): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val action = if (buttonState == 0) MotionEvent.ACTION_HOVER_MOVE else MotionEvent.ACTION_MOVE
+        val event = motionEvent(
+            action = action,
+            x = x,
+            y = y,
+            downTime = if (buttonState == 0) now else downTime,
+            eventTime = now,
+            metaState = metaState,
+            buttonState = buttonState,
+            source = InputDevice.SOURCE_MOUSE,
+            toolType = MotionEvent.TOOL_TYPE_MOUSE,
+        ) ?: return false
+        return transactInject(event, MODE_ASYNC)
+    }
+
+    /**
+     * Press or release of a single mouse button.
+     *
+     * [buttonState] is the state *after* the transition for a press and *before*
+     * it for a release -- exactly how the platform reports physical mice.
+     */
+    fun mouseButton(
+        down: Boolean,
+        x: Float,
+        y: Float,
+        buttonState: Int,
+        downTime: Long,
+        metaState: Int,
+    ): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val event = motionEvent(
+            action = if (down) MotionEvent.ACTION_DOWN else MotionEvent.ACTION_UP,
+            x = x,
+            y = y,
+            downTime = if (down) now else downTime,
+            eventTime = now,
+            metaState = metaState,
+            buttonState = buttonState,
+            source = InputDevice.SOURCE_MOUSE,
+            toolType = MotionEvent.TOOL_TYPE_MOUSE,
+        ) ?: return false
+        return transactInject(event, MODE_ASYNC)
+    }
+
+    /** `ACTION_HOVER_ENTER` / `ACTION_HOVER_EXIT`, so apps see the pointer leave. */
+    fun hoverBoundary(enter: Boolean, x: Float, y: Float): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val event = motionEvent(
+            action = if (enter) MotionEvent.ACTION_HOVER_ENTER else MotionEvent.ACTION_HOVER_EXIT,
+            x = x,
+            y = y,
+            downTime = now,
+            eventTime = now,
+            source = InputDevice.SOURCE_MOUSE,
+            toolType = MotionEvent.TOOL_TYPE_MOUSE,
+        ) ?: return false
+        return transactInject(event, MODE_ASYNC)
+    }
+
+    /**
+     * A real scroll wheel notch.
+     *
+     * `PointerCoords.setAxisValue` is public, so the scroll axes can be built
+     * into the event directly -- no `ACTION_SCROLL` axis workaround and no
+     * synthetic swipe. Positive [vScroll] scrolls content up, matching a wheel
+     * rolled away from the user.
+     */
+    fun scroll(x: Float, y: Float, hScroll: Float, vScroll: Float): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val event = motionEvent(
+            action = MotionEvent.ACTION_SCROLL,
+            x = x,
+            y = y,
+            downTime = now,
+            eventTime = now,
+            source = InputDevice.SOURCE_MOUSE,
+            toolType = MotionEvent.TOOL_TYPE_MOUSE,
+            hScroll = hScroll,
+            vScroll = vScroll,
+        ) ?: return false
+        return transactInject(event, MODE_ASYNC)
+    }
+
+    // -----------------------------------------------------------------------
+    // Touch events (SOURCE_TOUCHSCREEN)
+    // -----------------------------------------------------------------------
+
+    /** A zero-duration press/release at (x, y). */
+    fun tap(x: Float, y: Float, metaState: Int = 0): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val down = touchEvent(MotionEvent.ACTION_DOWN, x, y, now, now, metaState) ?: return false
+        val up = touchEvent(MotionEvent.ACTION_UP, x, y, now, now + 1, metaState) ?: return false
+        return transactInject(down, MODE_ASYNC) and transactInject(up, MODE_ASYNC)
+    }
+
+    /** A press-and-hold long enough to open a context menu. */
+    fun longPress(x: Float, y: Float, metaState: Int = 0): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val down = touchEvent(MotionEvent.ACTION_DOWN, x, y, now, now, metaState) ?: return false
+        val up = touchEvent(MotionEvent.ACTION_UP, x, y, now, now + LONG_PRESS_MS, metaState) ?: return false
+        if (!transactInject(down, MODE_ASYNC)) return false
+        SystemClock.sleep(LONG_PRESS_MS)
+        return transactInject(up, MODE_ASYNC)
+    }
+
+    fun touchDown(x: Float, y: Float, downTime: Long, metaState: Int): Boolean {
+        val event = touchEvent(MotionEvent.ACTION_DOWN, x, y, downTime, SystemClock.uptimeMillis(), metaState)
+            ?: return false
+        return transactInject(event, MODE_ASYNC)
+    }
+
+    fun touchMove(x: Float, y: Float, downTime: Long, metaState: Int): Boolean {
+        val event = touchEvent(MotionEvent.ACTION_MOVE, x, y, downTime, SystemClock.uptimeMillis(), metaState)
+            ?: return false
+        return transactInject(event, MODE_ASYNC)
+    }
+
+    fun touchUp(x: Float, y: Float, downTime: Long, metaState: Int): Boolean {
+        val event = touchEvent(MotionEvent.ACTION_UP, x, y, downTime, SystemClock.uptimeMillis(), metaState)
+            ?: return false
+        return transactInject(event, MODE_ASYNC)
+    }
+
+    /**
+     * Scrolls a touch-only app by synthesising a drag.
+     *
+     * Used by touch mode: [ACTION_SCROLL] is a mouse concept and plain views
+     * ignore it, so a wheel notch has to arrive as the swipe every app already
+     * understands. [distance] is in pixels and must clear the touch slop.
+     */
+    fun swipe(x: Float, y: Float, distance: Float, steps: Int = 4): Boolean {
+        val now = SystemClock.uptimeMillis()
+        val down = touchEvent(MotionEvent.ACTION_DOWN, x, y, now, now, 0) ?: return false
+        if (!transactInject(down, MODE_ASYNC)) return false
+
+        for (step in 1..steps) {
+            val progress = step.toFloat() / steps
+            val move = touchEvent(
+                MotionEvent.ACTION_MOVE,
+                x,
+                y + distance * progress,
+                now,
+                now + (SWIPE_STEP_MS * step),
+                0,
+            )
+            if (move != null) transactInject(move, MODE_ASYNC)
+        }
+
+        val up = touchEvent(MotionEvent.ACTION_UP, x, y + distance, now, now + SWIPE_STEP_MS * (steps + 1), 0)
+        return up != null && transactInject(up, MODE_ASYNC)
+    }
+
+    // -----------------------------------------------------------------------
+    // Keyboard
+    // -----------------------------------------------------------------------
+
+    fun key(keyCode: Int, down: Boolean, metaState: Int): Boolean {
+        val eventTime = SystemClock.uptimeMillis()
+        val event = try {
+            KeyEvent(
+                /* downTime = */ eventTime,
+                /* eventTime = */ eventTime,
+                /* action = */ if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
+                /* code = */ keyCode,
+                /* repeat = */ 0,
+                /* metaState = */ metaState,
+                /* deviceId = */ -1,
+                /* scanCode = */ 0,
+                /* flags = */ 0,
+                /* source = */ InputDevice.SOURCE_KEYBOARD,
+            )
+        } catch (error: Throwable) {
+            return false
+        }
+        return transactInject(event, MODE_ASYNC)
+    }
+
+    // -----------------------------------------------------------------------
+    // Event construction
+    // -----------------------------------------------------------------------
+
+    private fun touchEvent(
+        action: Int,
+        x: Float,
+        y: Float,
+        downTime: Long,
+        eventTime: Long,
+        metaState: Int,
+    ): MotionEvent? = try {
+        MotionEvent.obtain(downTime, eventTime, action, x, y, metaState).apply {
+            source = InputDevice.SOURCE_TOUCHSCREEN
+        }
+    } catch (error: Throwable) {
+        null
+    }
+
+    /**
+     * Builds a fully specified event.
+     *
+     * The six argument `MotionEvent.obtain` cannot express a button state or a
+     * scroll axis, and neither `setButtonState` nor `setAxisValue` exists on
+     * `MotionEvent` itself. The public overload that takes `PointerProperties`
+     * and `PointerCoords` can express all of it, and `PointerCoords` does have
+     * a public `setAxisValue` -- which is what makes a real wheel possible.
+     */
+    private fun motionEvent(
+        action: Int,
+        x: Float,
+        y: Float,
+        downTime: Long,
+        eventTime: Long,
+        metaState: Int = 0,
+        buttonState: Int = 0,
+        source: Int = InputDevice.SOURCE_TOUCHSCREEN,
+        toolType: Int = MotionEvent.TOOL_TYPE_FINGER,
+        hScroll: Float = 0f,
+        vScroll: Float = 0f,
+    ): MotionEvent? = try {
+        val properties = arrayOf(
+            MotionEvent.PointerProperties().apply {
+                id = 0
+                this.toolType = toolType
+            },
+        )
+        val coords = arrayOf(
+            MotionEvent.PointerCoords().apply {
+                this.x = x
+                this.y = y
+                pressure = 1f
+                size = 1f
+                if (hScroll != 0f) setAxisValue(MotionEvent.AXIS_HSCROLL, hScroll)
+                if (vScroll != 0f) setAxisValue(MotionEvent.AXIS_VSCROLL, vScroll)
+            },
+        )
+        MotionEvent.obtain(
+            downTime,
+            eventTime,
+            action,
+            /* pointerCount = */ 1,
+            properties,
+            coords,
+            metaState,
+            buttonState,
+            /* xPrecision = */ 1f,
+            /* yPrecision = */ 1f,
+            /* deviceId = */ 0,
+            /* edgeFlags = */ 0,
+            source,
+            /* flags = */ 0,
+        )
+    } catch (error: Throwable) {
+        logThrottled("cannot build motion event: ${error.javaClass.simpleName}: ${error.message}")
+        null
+    }
+
+    // -----------------------------------------------------------------------
+    // Binder plumbing
+    // -----------------------------------------------------------------------
+
     /**
      * The AIDL transaction code for `injectInputEvent`.
      *
@@ -89,7 +370,7 @@ class ShizukuInjector {
      *
      * Getting this wrong fails *silently*: the service returns an empty reply,
      * which `readException()` reads as "no error", so the event is dropped
-     * without a trace. The boolean-result check in `transactInject` is what turns
+     * without a trace. The boolean-result check in [transactInject] is what turns
      * that into a visible failure.
      */
     private fun transactionCode(): Int {
@@ -159,110 +440,6 @@ class ShizukuInjector {
         }
     }
 
-    /** A zero-duration press/release at (x, y). */
-    fun tap(x: Float, y: Float, metaState: Int = 0): Boolean {
-        val now = SystemClock.uptimeMillis()
-        val down = touchEvent(MotionEvent.ACTION_DOWN, x, y, now, now, metaState) ?: return false
-        val up = touchEvent(MotionEvent.ACTION_UP, x, y, now, now + 1, metaState) ?: return false
-        return transactInject(down, MODE_ASYNC) and transactInject(up, MODE_ASYNC)
-    }
-
-    /** A press-and-hold long enough to open a context menu. */
-    fun longPress(x: Float, y: Float, metaState: Int = 0): Boolean {
-        val now = SystemClock.uptimeMillis()
-        val down = touchEvent(MotionEvent.ACTION_DOWN, x, y, now, now, metaState) ?: return false
-        val up = touchEvent(MotionEvent.ACTION_UP, x, y, now, now + LONG_PRESS_MS, metaState) ?: return false
-        if (!transactInject(down, MODE_ASYNC)) return false
-        SystemClock.sleep(LONG_PRESS_MS)
-        return transactInject(up, MODE_ASYNC)
-    }
-
-    fun touchDown(x: Float, y: Float, downTime: Long, metaState: Int): Boolean {
-        val event = touchEvent(MotionEvent.ACTION_DOWN, x, y, downTime, SystemClock.uptimeMillis(), metaState)
-            ?: return false
-        return transactInject(event, MODE_ASYNC)
-    }
-
-    fun touchMove(x: Float, y: Float, downTime: Long, metaState: Int): Boolean {
-        val event = touchEvent(MotionEvent.ACTION_MOVE, x, y, downTime, SystemClock.uptimeMillis(), metaState)
-            ?: return false
-        return transactInject(event, MODE_ASYNC)
-    }
-
-    fun touchUp(x: Float, y: Float, downTime: Long, metaState: Int): Boolean {
-        val event = touchEvent(MotionEvent.ACTION_UP, x, y, downTime, SystemClock.uptimeMillis(), metaState)
-            ?: return false
-        return transactInject(event, MODE_ASYNC)
-    }
-
-    /**
-     * Scrolls by synthesising a drag.
-     *
-     * Android's `ACTION_SCROLL` axis cannot be attached to a freshly obtained
-     * `MotionEvent` (`setAxisValue` rejects an axis the event was not built
-     * with), so a wheel notch is delivered the way every remote-control app
-     * delivers it: as a short swipe that every app already understands.
-     * [distance] is in pixels and must clear the system touch slop.
-     */
-    fun swipe(x: Float, y: Float, distance: Float, steps: Int = 4): Boolean {
-        val now = SystemClock.uptimeMillis()
-        val down = touchEvent(MotionEvent.ACTION_DOWN, x, y, now, now, 0) ?: return false
-        if (!transactInject(down, MODE_ASYNC)) return false
-
-        for (step in 1..steps) {
-            val progress = step.toFloat() / steps
-            val moveY = y + distance * progress
-            val move = touchEvent(
-                MotionEvent.ACTION_MOVE,
-                x,
-                moveY,
-                now,
-                now + (SWIPE_STEP_MS * step),
-                0,
-            )
-            if (move != null) transactInject(move, MODE_ASYNC)
-        }
-
-        val up = touchEvent(MotionEvent.ACTION_UP, x, y + distance, now, now + SWIPE_STEP_MS * (steps + 1), 0)
-        return up != null && transactInject(up, MODE_ASYNC)
-    }
-
-    fun key(keyCode: Int, down: Boolean, metaState: Int): Boolean {
-        val eventTime = SystemClock.uptimeMillis()
-        val event = try {
-            KeyEvent(
-                /* downTime = */ eventTime,
-                /* eventTime = */ eventTime,
-                /* action = */ if (down) KeyEvent.ACTION_DOWN else KeyEvent.ACTION_UP,
-                /* code = */ keyCode,
-                /* repeat = */ 0,
-                /* metaState = */ metaState,
-                /* deviceId = */ -1,
-                /* scanCode = */ 0,
-                /* flags = */ 0,
-                /* source = */ InputDevice.SOURCE_KEYBOARD,
-            )
-        } catch (error: Throwable) {
-            return false
-        }
-        return transactInject(event, MODE_ASYNC)
-    }
-
-    private fun touchEvent(
-        action: Int,
-        x: Float,
-        y: Float,
-        downTime: Long,
-        eventTime: Long,
-        metaState: Int,
-    ): MotionEvent? = try {
-        MotionEvent.obtain(downTime, eventTime, action, x, y, metaState).apply {
-            source = InputDevice.SOURCE_TOUCHSCREEN
-        }
-    } catch (error: Throwable) {
-        null
-    }
-
     private val injectedCount = java.util.concurrent.atomic.AtomicInteger(0)
 
     private var lastLoggedAt = 0L
@@ -278,12 +455,6 @@ class ShizukuInjector {
     companion object {
         private const val TAG = "MyKvmInjector"
         private const val INPUT_MANAGER_DESCRIPTOR = "android.hardware.input.IInputManager"
-
-        /**
-         * `injectInputEvent` is the first method declared in AOSP's
-         * `IInputManager.aidl`, so AIDL assigns it FIRST_CALL_TRANSACTION.
-         */
-        private const val TRANSACTION_INJECT_INPUT_EVENT = IBinder.FIRST_CALL_TRANSACTION
 
         /** InputManager.INJECT_INPUT_EVENT_MODE_ASYNC */
         private const val MODE_ASYNC = 0

@@ -20,6 +20,7 @@ import com.mykvm.receiver.core.NativeCore
 import com.mykvm.receiver.input.InputDispatcher
 import com.mykvm.receiver.input.ShizukuInjector
 import com.mykvm.receiver.input.VirtualCursor
+import com.mykvm.receiver.input.InputMode
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.util.concurrent.atomic.AtomicBoolean
@@ -75,7 +76,9 @@ class KvmService : Service() {
         prefs = Prefs(this)
         injector = ShizukuInjector()
         cursor = VirtualCursor(this)
-        dispatcher = InputDispatcher(injector, cursor)
+        // The mode is read per event from the shared state, so flipping the
+        // switch in the UI takes effect immediately without a restart.
+        dispatcher = InputDispatcher(injector, cursor) { ReceiverState.current.inputMode }
 
         try {
             Shizuku.addRequestPermissionResultListener(shizukuPermissionListener)
@@ -177,6 +180,7 @@ class KvmService : Service() {
         ReceiverState.update {
             it.copy(
                 running = true,
+                inputMode = prefs.inputMode,
                 paired = response.optBoolean("paired", false),
                 deviceName = prefs.deviceName,
                 peerId = response.optString("peerId").takeIf { value -> value.isNotBlank() },

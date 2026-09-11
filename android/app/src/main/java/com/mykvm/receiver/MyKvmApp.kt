@@ -17,6 +17,7 @@ class MyKvmApp : Application() {
         ReceiverState.update {
             it.copy(
                 deviceName = prefs.deviceName,
+                inputMode = prefs.inputMode,
                 paired = prefs.isPaired,
                 connectedController = prefs.controllerName,
             )

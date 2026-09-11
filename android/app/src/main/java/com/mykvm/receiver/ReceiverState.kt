@@ -1,5 +1,6 @@
 package com.mykvm.receiver
 
+import com.mykvm.receiver.input.InputMode
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -15,6 +16,8 @@ data class ReceiverUiState(
     val pairingCode: String? = null,
     val pairingRequester: String? = null,
     val connectedController: String? = null,
+    /** Mouse = native SOURCE_MOUSE events, touch = synthetic touches. */
+    val inputMode: InputMode = InputMode.MOUSE,
     val deviceName: String = "",
     val peerId: String? = null,
     val quicPort: Int = 0,

@@ -43,7 +43,7 @@ fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.len() < 2 {
         eprintln!(
-            "usage: live_controller <pair-request|pair-confirm|move|click|scroll|key|trace|status> <host> [args...]"
+            "usage: live_controller <pair-request|pair-confirm|move|click|rclick|mclick|scroll|key|trace|status> <host> [args...]"
         );
         std::process::exit(2);
     }
@@ -73,6 +73,8 @@ fn main() {
             move_cursor(&host, &state_dir, &state, x, y)
         }
         "click" => click(&host, &state_dir, &state),
+        "rclick" => mouse_button(&host, &state_dir, &state, MouseButton::Right),
+        "mclick" => mouse_button(&host, &state_dir, &state, MouseButton::Middle),
         "scroll" => send_events(
             &host,
             &state_dir,
@@ -129,6 +131,24 @@ fn move_cursor(
 }
 
 /// Press and release in one connection, 60ms apart.
+/// Press and release a specific mouse button in one connection.
+fn mouse_button(
+    host: &str,
+    dir: &PathBuf,
+    state: &LiveState,
+    button: MouseButton,
+) -> Result<(), String> {
+    send_events(
+        host,
+        dir,
+        state,
+        &[
+            InputEvent::MouseButton { button, down: true },
+            InputEvent::MouseButton { button, down: false },
+        ],
+    )
+}
+
 fn click(host: &str, dir: &PathBuf, state: &LiveState) -> Result<(), String> {
     send_events(
         host,
@@ -425,15 +445,6 @@ fn pair_confirm(host: &str, dir: &PathBuf, state: &LiveState, code: &str) -> Res
     Ok(())
 }
 
-fn send_input(
-    host: &str,
-    dir: &PathBuf,
-    state: &LiveState,
-    event: InputEvent,
-) -> Result<(), String> {
-    send_events(host, dir, state, &[event])
-}
-
 /// Sends a batch of events over one QUIC connection.
 ///
 /// The connection is established lazily on the first datagram, and QUIC
@@ -493,25 +504,6 @@ fn send_events(
     // Let the datagrams leave before the transport is dropped.
     std::thread::sleep(Duration::from_millis(if events.len() > 1 { 400 } else { 600 }));
     Ok(())
-}
-
-/// Sweeps the cursor so both the connection and the visible pointer get a
-/// real workout.
-fn send_sweep(
-    host: &str,
-    dir: &PathBuf,
-    state: &LiveState,
-    path: &[((i32, i32), usize)],
-) -> Result<(), String> {
-    let events: Vec<InputEvent> = path
-        .iter()
-        .map(|((x, y), _)| InputEvent::MouseMove {
-            screen_id: screen_id(),
-            x: *x,
-            y: *y,
-        })
-        .collect();
-    send_events(host, dir, state, &events)
 }
 
 fn start_transport(

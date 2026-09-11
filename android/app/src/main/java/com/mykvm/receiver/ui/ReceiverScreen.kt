@@ -34,6 +34,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.mykvm.receiver.ReceiverState
 import com.mykvm.receiver.ShizukuStatus
+import com.mykvm.receiver.input.InputMode
 import com.mykvm.receiver.ReceiverUiState
 import kotlinx.coroutines.delay
 
@@ -49,6 +50,7 @@ fun ReceiverScreen(
     onGrantShizuku: () -> Unit,
     onOpenShizuku: () -> Unit,
     onGrantOverlay: () -> Unit,
+    onModeChange: (InputMode) -> Unit,
     onUnpair: () -> Unit,
 ) {
     val context = LocalContext.current
@@ -113,6 +115,8 @@ fun ReceiverScreen(
             primaryLabel = if (state.overlayGranted) null else "授权",
             onPrimary = onGrantOverlay,
         )
+
+        InputModeCard(state.inputMode, onModeChange)
 
         PairingCard(state, onUnpair)
 
@@ -208,6 +212,64 @@ private fun PrerequisiteCard(
                 Button(onClick = onPrimary) { Text(primaryLabel) }
             }
         }
+    }
+}
+
+@Composable
+private fun InputModeCard(current: InputMode, onChange: (InputMode) -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardColor),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text("输入模式", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                ModeButton(
+                    label = "鼠标模式",
+                    selected = current == InputMode.MOUSE,
+                    onClick = { onChange(InputMode.MOUSE) },
+                    modifier = Modifier.weight(1f),
+                )
+                ModeButton(
+                    label = "触摸模式",
+                    selected = current == InputMode.TOUCH,
+                    onClick = { onChange(InputMode.TOUCH) },
+                    modifier = Modifier.weight(1f),
+                )
+            }
+            Spacer(Modifier.height(10.dp))
+            Text(
+                when (current) {
+                    InputMode.MOUSE ->
+                        "以原生鼠标事件注入：支持悬停、真正的右键菜单和滚轮。" +
+                            "浏览器、办公、远程桌面这类支持鼠标的应用体验最好。"
+                    InputMode.TOUCH ->
+                        "以触摸事件注入：兼容所有应用（含不支持鼠标的游戏），" +
+                            "但右键只能长按、滚轮只能滑动。"
+                },
+                color = Muted,
+                fontSize = 12.sp,
+            )
+        }
+    }
+}
+
+@Composable
+private fun ModeButton(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    if (selected) {
+        Button(onClick = onClick, modifier = modifier) { Text(label) }
+    } else {
+        OutlinedButton(onClick = onClick, modifier = modifier) { Text(label) }
     }
 }
 

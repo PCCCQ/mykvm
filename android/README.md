@@ -62,31 +62,48 @@ Shizuku 的作用就是把 shell 权限借给普通应用，scrcpy 走的也是�
 
 ---
 
-## 四、操作映射
+## 四、输入模式：鼠标 / 触摸
 
-Android 没有右键，也没有系统光标，所以映射如下：
+App 首页有一个开关，桌面端不需要任何改动。
+
+### 鼠标模式（默认）
+
+以 `SOURCE_MOUSE` 注入，走 Android 自己的鼠标栈。
 
 | 电脑操作 | Android 行为 |
 |---|---|
-| 移动鼠标 | 移动**应用自绘的悬浮光标**（不注入，零延迟） |
-| 左键单击 | 在光标处点击 |
-| 按住左键拖动 | 连续触摸拖拽 |
-| 右键单击 | 长按（等同于打开上下文菜单） |
-| 中键 | 返回键 |
-| 鼠标侧键 | 返回（HOME / 最近任务受系统限制，无法注入） |
-| 滚轮 | 在光标处滑动（见下文说明） |
-| 键盘 | 直接注入 `KeyEvent`，修饰键（Ctrl/Alt/Shift/Win）有效 |
+| 移动鼠标 | `ACTION_HOVER_MOVE` —— 支持悬停高亮 |
+| 左键 | `BUTTON_PRIMARY` 的 `ACTION_DOWN`/`ACTION_UP` |
+| 右键 | `BUTTON_SECONDARY` —— **真正的右键菜单** |
+| 中键 | `BUTTON_TERTIARY` |
+| 鼠标侧键 | `BUTTON_BACK` / `BUTTON_FORWARD` |
+| 滚轮 | `ACTION_SCROLL` + `AXIS_VSCROLL`/`AXIS_HSCROLL` —— **真正的滚轮** |
+| 键盘 | `KeyEvent` + `SOURCE_KEYBOARD`，修饰键（Ctrl/Alt/Shift/Win）有效 |
+
+左键在所有 App 里都能用：View 框架会把鼠标的 `ACTION_DOWN`/`ACTION_UP`
+照样送进 `onTouchEvent`，与事件源无关。右键和滚轮只有支持鼠标的 App 才响应。
+
+### 触摸模式
+
+以 `SOURCE_TOUCHSCREEN` 注入合成触摸。兼容所有 App（包括完全不认鼠标的游戏），
+但能力有上限：
+
+| 电脑操作 | Android 行为 |
+|---|---|
+| 移动鼠标 | 只移动自绘光标，**不注入**（触摸设备没有悬停） |
+| 左键 | 合成 tap / 拖拽 |
+| 右键 | 伪造成**长按** |
+| 中键 / 侧键 | 返回键 |
+| 滚轮 | 伪造成**短距离滑动** |
+
+> 遇到某个 App 在鼠标模式下右键无反应，切到触摸模式即可 —— 这就是这个开关存在的意义。
+
+### 关于自绘光标
+
+**两种模式都使用应用自绘的悬浮光标**，因为 Android 不会为注入的鼠标事件画光标
+（详见第五节）。所以悬浮窗权限是必需的。
 
 屏幕以**物理像素 + scale 1.0** 上报，所以桌面端传来的坐标就是注入坐标，没有换算。
-
-### 关于滚轮
-
-滚轮被实现成**短距离滑动**，而不是 `ACTION_SCROLL`。
-
-原因是 `MotionEvent.setAxisValue()` 只允许给一个**本来就有该轴**的事件赋值，
-而 `MotionEvent.obtain()` 创建的事件不含 `AXIS_VSCROLL` 位，所以无法在注入前
-把滚动轴加上去。滑动是每一个 App 都能正确理解的方式，代价是滚动的惯性由
-系统手势决定，不完全等于鼠标滚轮。
 
 ---
 
@@ -149,6 +166,20 @@ Can't create handler inside thread Thread[mykvm-poll] that has not called Looper
 
 ---
 
+### 4. 不要指望系统为注入事件画光标
+
+Android 的鼠标光标由 `PointerController` 驱动，而它**只跟随真实输入设备**，
+不跟随 `injectInputEvent`。实机表现：
+
+- 注入鼠标事件时，`dumpsys input` 里始终是 `PointerController: Presentation: SPOT`
+  （触摸点样式），从未切成鼠标箭头样式。
+- 把自绘光标关掉、完整扫一遍屏幕，截图里什么都没留下。
+
+所以悬浮光标在两种模式下都必须保留 —— 触摸模式是因为触摸设备本就没有光标，
+鼠标模式是因为系统不会替我们画。
+
+---
+
 ## 六、真机验证状态
 
 已在 **Lenovo TB371FC（Android 14 / API 34 / arm64-v8a）** 上完成端到端验证：
@@ -158,10 +189,15 @@ Can't create handler inside thread Thread[mykvm-poll] that has not called Looper
 | UDP 发现（47833） | ✅ 探测即时得到 `reply` |
 | 配对握手 | ✅ 验证码显示 → QUIC `pair-confirm` 被接受并 ack |
 | QUIC 传输（47834） | ✅ TLS 1.3 连接 + 证书钉扎 |
-| 输入鉴权 | ✅ `first input packet accepted`，无凭证包被正确拒绝 |
-| 虚拟光标 | ✅ 跨应用显示，坐标像素级准确 |
-| **触摸注入** | ✅ 点击系统设置「屏幕刷新率」成功打开选择器 |
+| 输入鉴权 | ✅ `first input packet accepted`；未配对的第三方探测被静默忽略 |
+| **鼠标模式 · 光标** | ✅ 悬浮光标跨应用显示，坐标像素级准确 |
+| **鼠标模式 · 左键** | ✅ 打开系统设置的蓝牙页 |
+| **鼠标模式 · 滚轮** | ✅ 应用列表按真滚轮滚动 |
+| **鼠标模式 · 右键** | ✅ 便签正文弹出上下文菜单（剪切/复制/粘贴/全选…） |
+| **触摸模式 · 点击** | ✅ 打开系统设置的应用信息页 |
+| **触摸模式 · 滚动** | ✅ 应用列表滑动生效 |
 | **按键注入** | ✅ 注入 BACK 键使应用退回桌面 |
+| 模式切换 | ✅ 界面即时生效并持久化，切换时释放按住的按键 |
 
 仓库里带了两个可复用的验证工具：
 
@@ -172,8 +208,10 @@ cargo run --example live_controller -- pair-request <平板IP>
 cargo run --example live_controller -- pair-confirm <平板IP> <屏幕上的验证码>
 cargo run --example live_controller -- trace <平板IP>       # 扫一遍光标
 cargo run --example live_controller -- key <平板IP> 0xA6    # 注入 BACK 键
+cargo run --example live_controller -- rclick <平板IP>       # 右键
+cargo run --example live_controller -- scroll <平板IP>       # 滚轮
 
-# 无语设备时的快速连通性冒烟测试
+# 无设备时的快速连通性冒烟测试（仅对未配对的接收端有效）
 MYKVM_LIVE_PEER=<平板IP>:47833 cargo test -- --nocapture live_probe
 ```
 
@@ -273,7 +311,8 @@ android/
   `AccessibilityService` 兜底，但它只能点击/滑动，**无法注入键盘**，
   与被控端的核心需求不符，因此按精简方案移除。
 - **重启后需重启 Shizuku**（无 root 的固有限制）。
-- **滚轮不完全等于鼠标滚轮**（原因见上）。
+- **鼠标模式在触摸专属 App 里可能没有反应**：右键和滚轮依赖 App 支持鼠标，
+  不支持的就什么也不做。切到触摸模式即可（这正是那个开关的用途）。
 - **HOME / 最近任务键无法注入**：AOSP 对这类系统按键有额外的注入限制，
   即使持有 `INJECT_EVENTS` 也会被静默忽略。Back / 音量 / 媒体键不受影响。
 - **升级 Android 大版本后注入可能失效**：事务号表需要更新，见第五节。

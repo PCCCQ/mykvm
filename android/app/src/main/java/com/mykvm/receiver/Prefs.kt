@@ -40,6 +40,14 @@ class Prefs(context: Context) {
         }
 
     /** Whether we were running when the process died, so we can auto-restart. */
+    /**
+     * How input is delivered: native mouse events or synthetic touch.
+     * Defaults to mouse mode; see [com.mykvm.receiver.input.InputMode].
+     */
+    var inputMode: com.mykvm.receiver.input.InputMode
+        get() = com.mykvm.receiver.input.InputMode.fromKey(store.getString(KEY_INPUT_MODE, null))
+        set(value) = store.edit().putString(KEY_INPUT_MODE, value.key).apply()
+
     var shouldRun: Boolean
         get() = store.getBoolean(KEY_SHOULD_RUN, false)
         set(value) = store.edit().putBoolean(KEY_SHOULD_RUN, value).apply()
@@ -84,5 +92,6 @@ class Prefs(context: Context) {
         const val KEY_LAYOUT = "layout-json"
         const val KEY_CONTROLLER_NAME = "controller-name"
         const val KEY_SHOULD_RUN = "should-run"
+        const val KEY_INPUT_MODE = "input-mode"
     }
 }

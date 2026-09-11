@@ -816,6 +816,12 @@ mod tests {
     /// with a peer that is a *client*, on *android*, that has a screen, and that
     /// is asking to be paired. It is the closest thing to an end-to-end test
     /// that does not need the desktop app running.
+    ///
+    /// Only meaningful against an **unpaired** receiver. A paired one answers
+    /// nothing but its paired controller, and this test announces a throwaway
+    /// identity -- so a silent timeout here against a paired device is correct
+    /// behaviour, not a regression. Use `examples/live_controller` instead: it
+    /// persists a real controller identity, so it can re-pair and then drive input.
     #[test]
     fn live_probe_finds_a_running_receiver() {
         let Ok(target) = std::env::var("MYKVM_LIVE_PEER") else {

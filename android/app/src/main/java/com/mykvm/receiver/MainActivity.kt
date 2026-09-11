@@ -40,6 +40,13 @@ class MainActivity : ComponentActivity() {
                         onGrantShizuku = ::requestShizukuPermission,
                         onOpenShizuku = ::openShizukuApp,
                         onGrantOverlay = ::requestOverlayPermission,
+                        onModeChange = { mode ->
+                            // Persist for the next launch and publish immediately:
+                            // the dispatcher reads the shared state per event, so
+                            // the switch takes effect without restarting the service.
+                            Prefs(this).inputMode = mode
+                            ReceiverState.update { it.copy(inputMode = mode) }
+                        },
                         onUnpair = {
                             Prefs(this).unpair()
                             // Re-announce at once so the desktop drops us out of
