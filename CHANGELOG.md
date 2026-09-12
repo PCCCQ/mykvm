@@ -10,6 +10,8 @@ release will reuse them).
 
 ### Added
 
+- **Android receiver.** A phone or tablet can now be *controlled* by the desktop: mouse and keyboard drive it over USB tethering or Wi-Fi, with no root needed (input goes through Shizuku). Pick a mouse mode (native hover, context menus, wheel) or a touch mode (works in every app); pair with the 6-digit code shown on the device, and copy text from the desktop straight into the tablet.
+
 - **Linux input sharing (X11).** Linux machines can now both control other
   machines (edge-crossing capture via pointer/keyboard grabs, with the same
   edge-snap, hotkey switch and clipboard follow as Windows/macOS) and be
@@ -20,7 +22,21 @@ release will reuse them).
 
 ### Fixed
 
+- **Android: the tablet's keyboard no longer disappears.** The "keyboard passthrough" toggle used to leave the tablet with no input method at all — no soft keyboard, no way to switch IMEs, no Chinese input. It is off by default now, and no longer needed: with the tablet's own IME active the desktop's keys type normally, Chinese candidates included.
+
+- **Android: rotation and PC-mode changes no longer drop the connection.** The screen size is updated in place instead of restarting the receiver, which used to tear down the encrypted endpoint and make the desktop report "the server refused to accept a new connection".
+
+- **Android: re-pairing works again.** An already-paired tablet accepts a fresh pairing, and a rotated certificate or a moved LAN address refreshes the stored pairing record instead of silently rejecting every input packet.
+
+- **Android: the receiver survives aggressive power management.** A battery-optimisation exemption, a keep-alive alarm and a service watchdog keep it running with the screen off.
+
 - Keyboard, mouse, and clipboard could fail to connect between machines — the QUIC handshake rejected the peer with `invalid peer certificate: BadSignature`. The transport now pins the device's advertised certificate directly instead of running brittle chain validation over a self-signed certificate, which fixes cross-platform (macOS ↔ Windows) handshakes.
+
+### Improved
+
+- **Android: one-tap diagnostics.** One log covering both the app and the protocol core — view it, share it, clear it, or send it to the desktop in a single tap, where it lands next to the desktop's own log. Key events record their mapping and whether injection succeeded.
+
+- **Android: tablet PC mode.** The receiver reports the full display size, so the desktop's cursor maps correctly even inside a freeform window; the on-screen pointer size is adjustable.
 
 ### Removed
 
