@@ -79,8 +79,13 @@ Android 安装包（需要 JDK 17 + Android SDK/NDK，Rust 交叉编译由 Gradl
 
 ```bash
 cd android
-./gradlew :app:assembleRelease
+./gradlew :app:assembleDebug     # 已签名，可直接安装
+./gradlew :app:assembleRelease   # 体积更小，但产物未签名
 ```
+
+推送 `main` 或手动触发 Release 时，GitHub Actions 会自动构建 APK 并上传到 Release。
+配置了签名密钥（`ANDROID_KEYSTORE_BASE64` 等 secrets）时发布签名后的 release 版，
+否则发布可直接安装的 debug 版；Pull Request 上则两个变体都会构建并作为构建产物上传。
 
 ## 已知限制
 

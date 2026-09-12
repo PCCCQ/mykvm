@@ -79,8 +79,15 @@ Android APK (needs JDK 17 plus the Android SDK/NDK; Gradle drives the Rust cross
 
 ```bash
 cd android
-./gradlew :app:assembleRelease
+./gradlew :app:assembleDebug     # signed, installable as-is
+./gradlew :app:assembleRelease   # smaller, but the artifact is unsigned
 ```
+
+Pushing to `main` or dispatching the Release workflow makes GitHub Actions build the
+APK and attach it to the release. With signing secrets configured
+(`ANDROID_KEYSTORE_BASE64` and friends) it publishes the release-signed APK,
+otherwise it publishes the installable debug build; pull requests build and upload
+both variants as workflow artifacts.
 
 ## Known Limitations
 
