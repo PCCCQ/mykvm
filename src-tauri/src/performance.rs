@@ -236,7 +236,15 @@ mod tests {
         let (cpu, memory_mb) = parse_process_metrics(" 2.5 115664\n").expect("metrics");
 
         assert_eq!(cpu, 2.5);
-        assert!((memory_mb - 112.953125).abs() < f64::EPSILON);
+        // `ps` reports RSS in KB, but the Windows reader feeds this same helper
+        // megabytes, so the divisor is per-target. Asserting the unix figure on
+        // Windows made this test fail on every Windows checkout.
+        let expected = if cfg!(target_os = "windows") {
+            115664.0
+        } else {
+            112.953125
+        };
+        assert!((memory_mb - expected).abs() < f64::EPSILON);
     }
 
     #[cfg(target_os = "macos")]
