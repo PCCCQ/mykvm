@@ -180,6 +180,57 @@ Android 的鼠标光标由 `PointerController` 驱动，而它**只跟随真实�
 
 ---
 
+### 5. 屏幕尺寸变化不再重启接收端
+
+旋转屏幕、进出电脑模式都会触发 `onConfigurationChanged`。**不要**在这里
+`stopReceiver(); startReceiver()`：那会关掉 QUIC endpoint，电脑端正在用的连接被
+掐断，日志里表现为连续多条
+
+```
+QUIC send to <ip>:47834 failed: ... the server refused to accept a new connection
+```
+
+现在的做法是把屏幕尺寸放进 `ReceiverConfig` 里共享的 `Arc<Mutex<Screen>>`，由
+Kotlin 调 `NativeCore.nativeSetScreenSize(w, h)` 原地更新；discovery 线程每 3 秒的
+announce 会自己带上新尺寸，电脑端无需重连。`Receiver::stop()` 也做了幂等，
+避免 `nativeStop` + `Drop` 打印两条 `receiver stopped`。
+
+### 6. 已配对的接收端仍然接受重新配对
+
+配对链路的授权凭据是**屏幕上显示的验证码**，所以接收端只要是 client 角色就接受
+任何 server 的 `pair-request`。早期版本要求"未配对或请求者已被认识"才发验证码，
+导致存下来的 controller 记录一旦过期（电脑端重装后证书轮换、或 IP 在 Wi-Fi/USB
+共享之间变化），电脑端点配对只会收到 “no pairing challenge received”，用户只能两边
+清空配对才能恢复。
+
+同时 discovery 线程会像桌面端的 `refresh_paired_controller_keys` 一样，用
+`can_refresh_controller_identity` **刷新**已存的 controller 记录（id / 证书公钥 /
+host / ip / 名称）。注意这个判定比"能不能重新配对"更严格：只按 IP 匹配不足以重写
+凭据，否则同一台电脑上跑两个 MyKVM 实例会互相顶掉配对记录。
+
+### 7. 安卓端日志与一键上传
+
+- `diag/Diag.kt` 写 `filesDir/diagnostics/mykvm-android.log`（512KB 轮转），
+  Rust 侧的 `TeeLogger` 把同样的记录同时写进这个文件，所以一份日志里既有 Kotlin
+  的注入流程，也有协议层的 discovery/QUIC 记录。
+- 界面底部「诊断日志」卡片：**发送到电脑**（走已配对的 QUIC stream，
+  `mykvm.diagnostics.v1`，电脑端存到自己的日志目录）、查看 / 刷新、分享
+  （FileProvider）、清空。
+- 排查时最快的路径仍然是 `adb logcat -s mykvm-core MyKvmDiag MyKvmService`。
+
+### 8. 后台保活
+
+前台服务在激进 ROM 上仍可能被冻结或杀掉，所以：
+
+- 界面提供「加入白名单」按钮（`ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`）；
+- `KeepAlive` 用 `setAndAllowWhileIdle` 每 9 分钟发一次广播，
+  `KeepAliveReceiver` 在服务该运行时把它拉起来（重启后 `BOOT_COMPLETED` 同理）；
+- 服务内部的 watchdog 每 15 秒确认 poll 线程还活着，死了就原地重启。
+
+`KvmService.start()` 会先发通知再判断"是否已在运行"，因为从闹钟/开机广播经
+`startForegroundService` 进来时，即使接收端没停也必须立刻进入前台，否则系统会抛
+`ForegroundServiceDidNotStartInTimeException`。
+
 ## 六、真机验证状态
 
 已在 **Lenovo TB371FC（Android 14 / API 34 / arm64-v8a）** 上完成端到端验证：

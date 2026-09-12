@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -56,6 +57,11 @@ fun ReceiverScreen(
     onClipboardSyncChange: (Boolean) -> Unit,
     onRestoreIme: () -> Unit,
     onUnpair: () -> Unit,
+    onViewLog: () -> Unit,
+    onClearLog: () -> Unit,
+    onShareLog: () -> Unit,
+    onSendLog: () -> Unit,
+    onRequestBatteryExemption: () -> Unit,
 ) {
     val context = LocalContext.current
     val state by ReceiverState.state.collectAsState()
@@ -126,6 +132,16 @@ KeyboardCard(state, onKeyboardPassthroughChange, onRestoreIme)
         ClipboardCard(state.clipboardSync, onClipboardSyncChange)
 
         PairingCard(state, onUnpair)
+
+        DiagnosticsCard(
+            state = state,
+            onView = onViewLog,
+            onClear = onClearLog,
+            onShare = onShareLog,
+            onSend = onSendLog,
+        )
+
+        BatteryCard(state, onRequestBatteryExemption)
 
         InfoCard(state)
 
@@ -407,6 +423,118 @@ private fun ModeButton(
         Button(onClick = onClick, modifier = modifier) { Text(label) }
     } else {
         OutlinedButton(onClick = onClick, modifier = modifier) { Text(label) }
+    }
+}
+
+/**
+ * The in-app log viewer, plus the one-tap ways out of the device: upload to the
+ * paired desktop, or hand the file to any other app.
+ */
+@Composable
+private fun DiagnosticsCard(
+    state: ReceiverUiState,
+    onView: () -> Unit,
+    onClear: () -> Unit,
+    onShare: () -> Unit,
+    onSend: () -> Unit,
+) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardColor),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text("诊断日志", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "记录配对、连接和键鼠注入的每一步。出问题时点「发送到电脑」，" +
+                    "日志会存到电脑的日志目录里。",
+                color = Muted,
+                fontSize = 13.sp,
+            )
+
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.horizontalScroll(rememberScrollState()),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Button(onClick = onSend) { Text("发送到电脑") }
+                OutlinedButton(onClick = onView) {
+                    Text(if (state.logText == null) "查看" else "刷新")
+                }
+                OutlinedButton(onClick = onShare) { Text("分享") }
+                OutlinedButton(onClick = onClear) { Text("清空") }
+            }
+
+            state.logNotice?.let {
+                Spacer(Modifier.height(8.dp))
+                Text(it, color = OkColor, fontSize = 12.sp)
+            }
+
+            state.logText?.let { log ->
+                Spacer(Modifier.height(10.dp))
+                Box(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(220.dp)
+                        .background(Color(0xFF0C0E12), RoundedCornerShape(8.dp))
+                        .verticalScroll(rememberScrollState())
+                        .padding(10.dp),
+                ) {
+                    Text(
+                        log.ifBlank { "（暂无日志）" },
+                        color = Color(0xFFD7DEE8),
+                        fontSize = 10.sp,
+                        fontFamily = FontFamily.Monospace,
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * The battery-optimisation exemption. Some ROMs kill a foreground service while
+ * the screen is off, which is the whole time this app is useful, so the user is
+ * walked to the standard system dialog once.
+ */
+@Composable
+private fun BatteryCard(state: ReceiverUiState, onRequest: () -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = CardColor),
+        shape = RoundedCornerShape(14.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Dot(if (state.batteryExempt) OkColor else WarnColor)
+            Spacer(Modifier.width(12.dp))
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "后台保活",
+                    color = Color.White,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Medium,
+                )
+                Text(
+                    if (state.batteryExempt) {
+                        "已加入电池优化白名单，锁屏后仍会保持连接"
+                    } else {
+                        "未加入白名单。部分平板锁屏后会杀掉接收服务，断连就是这个原因"
+                    },
+                    color = Muted,
+                    fontSize = 13.sp,
+                )
+            }
+            if (!state.batteryExempt) {
+                Spacer(Modifier.width(12.dp))
+                Button(onClick = onRequest) { Text("加入白名单") }
+            }
+        }
     }
 }
 

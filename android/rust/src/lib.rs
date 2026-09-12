@@ -29,7 +29,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 use jni::objects::{JClass, JString};
-use jni::sys::jstring;
+use jni::sys::{jint, jstring};
 use jni::JNIEnv;
 
 use events::ReceiverEvent;
@@ -42,22 +42,104 @@ static RECEIVER: Mutex<Option<Receiver>> = Mutex::new(None);
 /// `nativeStop` needs.
 static EVENTS: Mutex<Option<MpscReceiver<ReceiverEvent>>> = Mutex::new(None);
 
-/// Android-only: pipes the log facade into logcat. Elsewhere this is a no-op
-/// so the protocol crate still builds (and its tests still run) on a host.
+/// Android-only: tees every `log` record into logcat *and* into a diagnostics
+/// file the UI can read and send to the desktop.
+///
+/// Both halves matter. Logcat is what `adb logcat` shows while developing; the
+/// file is what the user can actually reach from the phone when something goes
+/// wrong on their device.
 #[cfg(target_os = "android")]
-fn logger_init() {
-    static INIT: OnceLock<()> = OnceLock::new();
-    INIT.get_or_init(|| {
-        android_logger::init_once(
+struct TeeLogger {
+    android: android_logger::AndroidLogger,
+    file: Mutex<Option<std::fs::File>>,
+}
+
+#[cfg(target_os = "android")]
+impl log::Log for TeeLogger {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Info
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        use std::io::Write as _;
+        self.android.log(record);
+
+        let Ok(mut guard) = self.file.lock() else {
+            return;
+        };
+        let Some(file) = guard.as_mut() else {
+            return;
+        };
+        // Seconds since start; enough to line events up with the desktop, and
+        // it avoids pulling in a date formatting crate.
+        let _ = writeln!(
+            file,
+            "{:>8.3}s {:<5} {}: {}",
+            PROCESS_START
+                .get_or_init(std::time::Instant::now)
+                .elapsed()
+                .as_secs_f64(),
+            record.level(),
+            record.target(),
+            record.args()
+        );
+    }
+
+    fn flush(&self) {
+        use std::io::Write as _;
+        if let Ok(mut guard) = self.file.lock() {
+            if let Some(file) = guard.as_mut() {
+                let _ = file.flush();
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+static PROCESS_START: OnceLock<std::time::Instant> = OnceLock::new();
+
+/// Installs the tee logger once, with the diagnostics path from the config.
+#[cfg(target_os = "android")]
+fn logger_init(log_path: Option<std::path::PathBuf>) {
+    static INSTALLED: OnceLock<()> = OnceLock::new();
+    if INSTALLED.get().is_some() {
+        return;
+    }
+    INSTALLED.set(()).ok();
+
+    let mut opened = None;
+    if let Some(path) = log_path {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        opened = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .ok();
+    }
+
+    let logger = TeeLogger {
+        android: android_logger::AndroidLogger::new(
             android_logger::Config::default()
                 .with_max_level(log::LevelFilter::Info)
                 .with_tag("mykvm-core"),
-        );
-    });
+        ),
+        file: Mutex::new(opened),
+    };
+
+    if log::set_boxed_logger(Box::new(logger)).is_ok() {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+    log::info!("diagnostics session started");
 }
 
+/// Everywhere else the crate stays quiet so its tests can run on a host.
 #[cfg(not(target_os = "android"))]
-fn logger_init() {}
+fn logger_init(_log_path: Option<std::path::PathBuf>) {}
 
 fn json_error(message: &str) -> String {
     serde_json::json!({ "ok": false, "error": message }).to_string()
@@ -84,8 +166,6 @@ pub extern "system" fn Java_com_mykvm_receiver_core_NativeCore_nativeStart<'loca
     _class: JClass<'local>,
     config: JString<'local>,
 ) -> jstring {
-    logger_init();
-
     let config: String = match env.get_string(&config) {
         Ok(value) => value.into(),
         Err(error) => {
@@ -108,6 +188,10 @@ pub extern "system" fn Java_com_mykvm_receiver_core_NativeCore_nativeStart<'loca
             .and_then(|value| value.as_str())
             .map(|value| value.to_string())
     };
+    // The Kotlin side owns the path: it is the one that reads the file back
+    // for the in-app log viewer.
+    logger_init(string("logFile").map(std::path::PathBuf::from));
+
     let number = |key: &str, fallback: i64| -> i64 {
         parsed
             .get(key)
@@ -311,6 +395,71 @@ pub extern "system" fn Java_com_mykvm_receiver_core_NativeCore_nativeSetLayout<'
     };
     receiver.set_layout(layout);
     to_jstring(&mut env, &json_ok())
+}
+
+/// Re-advertises the display size without restarting the receiver.
+///
+/// Rotation and PC-mode window resizes both land here. Restarting instead used
+/// to close the QUIC endpoint, which dropped the desktop's live connection and
+/// surfaced as "the server refused to accept a new connection" until the new
+/// endpoint came up.
+#[no_mangle]
+pub extern "system" fn Java_com_mykvm_receiver_core_NativeCore_nativeSetScreenSize<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    width: jint,
+    height: jint,
+) -> jstring {
+    let Ok(slot) = RECEIVER.lock() else {
+        return to_jstring(&mut env, &json_error("receiver lock poisoned"));
+    };
+    let Some(receiver) = slot.as_ref() else {
+        return to_jstring(&mut env, &json_error("receiver is not running"));
+    };
+    receiver.set_screen_size(width, height);
+    to_jstring(&mut env, &json_ok())
+}
+
+/// Uploads the diagnostics log to the paired desktop over the existing QUIC
+/// stream. Kotlin owns the file, so it hands us the text and the file name.
+#[no_mangle]
+pub extern "system" fn Java_com_mykvm_receiver_core_NativeCore_nativeSendDiagnostics<'local>(
+    mut env: JNIEnv<'local>,
+    _class: JClass<'local>,
+    file_name: JString<'local>,
+    text: JString<'local>,
+) -> jstring {
+    let file_name: String = match env.get_string(&file_name) {
+        Ok(value) => value.into(),
+        Err(error) => {
+            let message = format!("invalid file name: {error}");
+            return to_jstring(&mut env, &json_error(&message));
+        }
+    };
+    let text: String = match env.get_string(&text) {
+        Ok(value) => value.into(),
+        Err(error) => {
+            let message = format!("invalid diagnostics text: {error}");
+            return to_jstring(&mut env, &json_error(&message));
+        }
+    };
+    if text.trim().is_empty() {
+        return to_jstring(&mut env, &json_error("日志是空的"));
+    }
+
+    let Ok(slot) = RECEIVER.lock() else {
+        return to_jstring(&mut env, &json_error("receiver lock poisoned"));
+    };
+    let Some(receiver) = slot.as_ref() else {
+        return to_jstring(&mut env, &json_error("receiver is not running"));
+    };
+    match receiver.send_diagnostics(&file_name, &text) {
+        Ok(()) => to_jstring(
+            &mut env,
+            &serde_json::json!({ "ok": true, "bytes": text.len() }).to_string(),
+        ),
+        Err(error) => to_jstring(&mut env, &json_error(&error)),
+    }
 }
 
 #[no_mangle]

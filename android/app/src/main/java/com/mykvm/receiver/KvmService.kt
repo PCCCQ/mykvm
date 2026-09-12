@@ -27,6 +27,7 @@ import com.mykvm.receiver.input.ShizukuInjector
 import com.mykvm.receiver.input.VirtualCursor
 import com.mykvm.receiver.input.InputMode
 import com.mykvm.receiver.input.ImeSuppressor
+import com.mykvm.receiver.diag.Diag
 import org.json.JSONObject
 import rikka.shizuku.Shizuku
 import java.util.concurrent.atomic.AtomicBoolean
@@ -50,6 +51,31 @@ class KvmService : Service() {
 
     private var pollThread: Thread? = null
     private val running = AtomicBoolean(false)
+
+    /**
+     * Watches the poll thread. A foreground service survives most things, but
+     * an aggressive ROM can still freeze or kill the process; if the poll
+     * thread is gone while we believe we are running, restart in place instead
+     * of sitting there looking healthy with a dead core.
+     */
+    private val watchdog = object : Runnable {
+        override fun run() {
+            if (!running.get()) return
+            val thread = pollThread
+            if (thread == null || !thread.isAlive) {
+                Diag.warn("poll thread is gone; restarting the receiver")
+                stopReceiver()
+                startReceiver()
+                return
+            }
+            // No need to touch AlarmManager here: it re-arms itself in
+            // KeepAliveReceiver, so a binder call every 15s would be waste.
+            mainHandler.postDelayed(this, WATCHDOG_INTERVAL_MS)
+        }
+    }
+
+    /** Last notification text, so a keep-alive restart does not blank it. */
+    private var lastNotificationText: String? = null
 
     private var multicastLock: WifiManager.MulticastLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
@@ -81,6 +107,8 @@ class KvmService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        // First, so the very first thing that can go wrong is already recorded.
+        Diag.init(this)
         prefs = Prefs(this)
         injector = ShizukuInjector()
         // Read the size on the main thread each time the overlay is rebuilt, so
@@ -103,6 +131,7 @@ class KvmService : Service() {
         when (intent?.action) {
             ACTION_STOP -> {
                 prefs.shouldRun = false
+                KeepAlive.cancel(this)
                 stopReceiver()
                 stopSelf()
                 return START_NOT_STICKY
@@ -118,12 +147,14 @@ class KvmService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         // Screen size feeds the coordinates the desktop maps its cursor into, so
-        // a rotation invalidates them. Restarting re-announces the new geometry.
-        if (running.get()) {
-            Log.i(TAG, "display configuration changed; restarting receiver")
-            stopReceiver()
-            startReceiver()
-        }
+        // a rotation invalidates them -- but only the *size* changed. Restarting
+        // the receiver for that used to tear down the QUIC endpoint, which
+        // dropped the desktop's live connection and made it log "the server
+        // refused to accept a new connection" until the new endpoint came up.
+        // Re-advertising the size in place keeps the connection alive.
+        Log.i(TAG, "display configuration changed; re-advertising screen size")
+        Diag.info("display configuration changed: $newConfig")
+        publishScreenSize()
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -145,9 +176,15 @@ class KvmService : Service() {
     // -----------------------------------------------------------------------
 
     private fun startReceiver() {
+        // Post the notification *before* the "are we already running" check: a
+        // restart from the alarm or the boot receiver arrives through
+        // startForegroundService, which obliges us to be foreground within a few
+        // seconds even when the receiver never stopped.
+        startForegroundNotification(
+            lastNotificationText ?: getString(R.string.notification_idle),
+        )
         if (running.getAndSet(true)) return
 
-        startForegroundNotification(getString(R.string.notification_idle))
         acquireLocks()
 
         // Take the tablet's IME out of the way so injected keys reach the app
@@ -165,6 +202,7 @@ class KvmService : Service() {
         }
 
         val bounds = currentDisplayBounds()
+        Diag.info("starting receiver: screen=${bounds.first}x${bounds.second}")
         val config = JSONObject().apply {
             put("deviceName", prefs.deviceName)
             put("stableId", prefs.stableId)
@@ -175,6 +213,9 @@ class KvmService : Service() {
             put("discoveryPort", DISCOVERY_PORT)
             put("quicPort", QUIC_PORT)
             put("identityDir", filesDir.absolutePath)
+            // The Rust core tees its own log records into this same file, so one
+            // upload carries both the app and the protocol side.
+            put("logFile", Diag.path(this@KvmService))
             // The persisted layout is Rust's own JSON; pass it back verbatim.
             prefs.layoutJson?.let { put("layout", JSONObject(it)) }
         }
@@ -188,6 +229,7 @@ class KvmService : Service() {
         if (!response.optBoolean("ok")) {
             running.set(false)
             val message = response.optString("error", "启动失败")
+            Diag.error("native start failed: $message")
             ReceiverState.update { it.copy(running = false, lastError = message) }
             stopForeground(STOP_FOREGROUND_REMOVE)
             return
@@ -209,10 +251,17 @@ class KvmService : Service() {
         publishShizukuState()
 
         pollThread = thread(name = "mykvm-poll", isDaemon = true) { pollLoop() }
+        // The process may be killed while the tablet sleeps, so leave an alarm
+        // behind that can bring the service back without the user noticing.
+        KeepAlive.schedule(this)
+        mainHandler.removeCallbacks(watchdog)
+        mainHandler.postDelayed(watchdog, WATCHDOG_INTERVAL_MS)
     }
 
     private fun stopReceiver() {
         if (!running.getAndSet(false)) return
+        Diag.info("stopping receiver")
+        mainHandler.removeCallbacks(watchdog)
         pollThread?.join(500)
         pollThread = null
         dispatcher.releaseAll()
@@ -230,14 +279,22 @@ class KvmService : Service() {
     }
 
     /**
-     * Re-advertises the screen after a geometry change by tearing the core down
-     * and starting it again. Done on the main thread because the caller is the
-     * poll thread, which stopReceiver() has to join.
+     * Re-advertises the current display size without restarting the receiver.
+     *
+     * The discovery loop reads the size out of the shared screen on every
+     * announce (3s), so the desktop picks the new geometry up on its own -- no
+     * reconnect, no dropped input.
      */
-    private fun restartForGeometryChange() {
-        mainHandler.post {
-            stopReceiver()
-            startReceiver()
+    private fun publishScreenSize() {
+        if (!running.get()) return
+        val bounds = currentDisplayBounds()
+        try {
+            val response = JSONObject(NativeCore.nativeSetScreenSize(bounds.first, bounds.second))
+            if (!response.optBoolean("ok")) {
+                Diag.warn("nativeSetScreenSize failed: ${response.optString("error")}")
+            }
+        } catch (error: Throwable) {
+            Diag.warn("nativeSetScreenSize threw", error)
         }
     }
 
@@ -261,15 +318,16 @@ class KvmService : Service() {
                 val bounds = currentDisplayBounds()
                 if (bounds != lastBounds) {
                     Log.i(TAG, "display bounds changed: $lastBounds -> $bounds")
+                    Diag.info("display bounds changed: $lastBounds -> $bounds")
                     lastBounds = bounds
-                    restartForGeometryChange()
-                    return
+                    publishScreenSize()
                 }
             }
             val payload = try {
                 NativeCore.nativePoll(POLL_TIMEOUT_MS)
             } catch (error: Throwable) {
                 Log.e(TAG, "poll failed: ${error.message}")
+                Diag.error("native poll failed; receiver stopped", error)
                 break
             } ?: continue
 
@@ -289,20 +347,29 @@ class KvmService : Service() {
                 dispatcher.handleEvent(input)
             }
 
-            "pairingRequested" -> ReceiverState.update {
-                it.copy(
-                    pairingCode = event.optString("code"),
-                    pairingRequester = event.optString("requesterName"),
-                    lastError = null,
+            "pairingRequested" -> {
+                Diag.info(
+                    "pairing requested by ${event.optString("requesterName")} " +
+                        "(${event.optString("requesterIp")})",
                 )
+                ReceiverState.update {
+                    it.copy(
+                        pairingCode = event.optString("code"),
+                        pairingRequester = event.optString("requesterName"),
+                        lastError = null,
+                    )
+                }
             }
 
             "pairingCleared" -> ReceiverState.update { it.copy(pairingCode = null) }
 
             "clipboardText" -> applyClipboardText(event.optString("text"))
 
-            "pairingFailed" -> ReceiverState.update {
-                it.copy(lastError = event.optString("reason"))
+            "pairingFailed" -> {
+                Diag.warn("pairing failed: ${event.optString("reason")}")
+                ReceiverState.update {
+                    it.copy(lastError = event.optString("reason"))
+                }
             }
 
             "paired" -> {
@@ -312,6 +379,7 @@ class KvmService : Service() {
                 val controller = event.optString("controllerName")
                     .takeIf { it.isNotBlank() }
                     ?: event.optString("controllerId")
+                Diag.info("paired with $controller")
                 ReceiverState.update {
                     it.copy(
                         paired = true,
@@ -402,6 +470,7 @@ class KvmService : Service() {
     }
 
     private fun startForegroundNotification(text: String) {
+        lastNotificationText = text
         val notification = buildNotification(text)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceCompat.startForeground(
@@ -416,6 +485,7 @@ class KvmService : Service() {
     }
 
     private fun updateNotification(text: String) {
+        lastNotificationText = text
         val manager = androidx.core.app.NotificationManagerCompat.from(this)
         if (manager.areNotificationsEnabled()) {
             manager.notify(NOTIFICATION_ID, buildNotification(text))
@@ -498,6 +568,9 @@ class KvmService : Service() {
         private const val SHIZUKU_PERMISSION_REQUEST = 4001
         private const val POLL_TIMEOUT_MS = 200L
 
+        /** How often the service checks that its poll thread is still alive. */
+        private const val WATCHDOG_INTERVAL_MS = 15_000L
+
         /** Must match the desktop's discovery/QUIC defaults. */
         private const val DISCOVERY_PORT = 47833
         private const val QUIC_PORT = 47834
@@ -514,9 +587,24 @@ class KvmService : Service() {
             context.startForegroundService(intent)
         }
 
+        /**
+         * Stops the receiver for good.
+         *
+         * The intent can be refused (Android 12+ blocks a background
+         * `startService`), so the "do not come back" flag is written first --
+         * a refused delivery must not leave the service to be resurrected by
+         * the keep-alive alarm.
+         */
         fun stop(context: Context) {
+            Prefs(context).shouldRun = false
+            KeepAlive.cancel(context)
             val intent = Intent(context, KvmService::class.java).setAction(ACTION_STOP)
-            context.startService(intent)
+            try {
+                context.startService(intent)
+            } catch (error: Throwable) {
+                Diag.warn("stop intent refused; stopping the service directly", error)
+                context.stopService(Intent(context, KvmService::class.java))
+            }
         }
 
         fun requestShizukuPermission(requestCode: Int = SHIZUKU_PERMISSION_REQUEST) {

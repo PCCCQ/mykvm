@@ -52,6 +52,9 @@ const MAX_DISCOVERY_PEERS: usize = 128;
 const PAIRING_CODE_TTL_MS: u64 = 60_000;
 const PAIRING_MAX_ATTEMPTS: u8 = 5;
 const CLIPBOARD_PROTOCOL: &str = "mykvm.clipboard.v1";
+// One-shot log upload from an Android receiver; mirrors the receiver crate's
+// `packet::DIAGNOSTICS_PROTOCOL`.
+const DIAGNOSTICS_PROTOCOL: &str = "mykvm.diagnostics.v1";
 // After we write clipboard content received from a peer, ignore our own
 // clipboard for a short grace window. Reading an image back through the OS
 // pasteboard is not always byte-identical to what we wrote (macOS re-encodes
@@ -703,6 +706,7 @@ impl AppRuntime {
         let clipboard_last_sequences = Arc::clone(&self.clipboard_last_sequences);
         let clipboard_target = Arc::clone(&self.clipboard_target);
         let app_handle_for_file_transfer = self.app_handle.clone();
+        let app_handle_for_diagnostics = self.app_handle.clone();
         let file_transfers = Arc::clone(&self.file_transfers);
         let transport_packets_for_input = Arc::clone(&self.transport_packets);
         let transport_packets_for_stream = Arc::clone(&self.transport_packets);
@@ -754,6 +758,19 @@ impl AppRuntime {
                 layout.clone()
             };
             let current_peer = local_peer_from_layout(&layout);
+
+            if handle_diagnostics_packet(
+                &payload,
+                &layout,
+                app_handle_for_diagnostics
+                    .path()
+                    .app_log_dir()
+                    .ok()
+                    .as_deref(),
+            ) {
+                transport_packets_for_stream.fetch_add(1, Ordering::Relaxed);
+                return true;
+            }
 
             if handle_file_transfer_packet(
                 &payload,
@@ -4666,6 +4683,72 @@ where
     Err(last_error.unwrap_or_else(|| "failed to write clipboard content".into()))
 }
 
+/// Writes an Android receiver's uploaded log next to our own log file.
+///
+/// Returns true when the packet was a diagnostics upload (whether or not it was
+/// accepted), so the caller stops trying other stream handlers.
+fn handle_diagnostics_packet(payload: &[u8], layout: &LayoutState, log_dir: Option<&Path>) -> bool {
+    let Some(packet) = decode_wire_packet::<DiagnosticsPacket>(payload) else {
+        return false;
+    };
+    if packet.protocol != DIAGNOSTICS_PROTOCOL {
+        return false;
+    }
+
+    if !clipboard_packet_authorized_fields(
+        layout,
+        &packet.cluster_id,
+        &packet.pair_secret,
+        &packet.origin_transport_public_key,
+        &packet.origin_id,
+    ) {
+        log::warn!(
+            "rejected a diagnostics upload from {}: pairing credentials did not match",
+            if packet.origin_id.trim().is_empty() {
+                "<unknown>"
+            } else {
+                packet.origin_id.as_str()
+            }
+        );
+        return true;
+    }
+
+    let Some(log_dir) = log_dir else {
+        log::warn!("dropped a diagnostics upload: the log directory is unavailable");
+        return true;
+    };
+
+    let origin = sanitize_id(if packet.origin_id.trim().is_empty() {
+        packet.file_name.as_str()
+    } else {
+        packet.origin_id.as_str()
+    });
+    let path = log_dir.join(format!("android-diagnostics-{origin}.log"));
+    let stamp = now_ms();
+    let text = packet.text.replace("\r\n", "\n");
+    let body = format!(
+        "\n===== upload {stamp} from {} ({} bytes) =====\n{}",
+        if packet.origin_id.trim().is_empty() {
+            "unknown"
+        } else {
+            packet.origin_id.as_str()
+        },
+        text.len(),
+        text
+    );
+
+    match fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut file| file.write_all(body.as_bytes()))
+    {
+        Ok(()) => log::info!("android diagnostics saved to {}", path.display()),
+        Err(error) => log::warn!("could not save android diagnostics to {}: {error}", path.display()),
+    }
+    true
+}
+
 fn handle_clipboard_packet(
     payload: &[u8],
     layout: &LayoutState,
@@ -4838,10 +4921,29 @@ fn clipboard_content_from_format(format: ClipboardFormat) -> Option<ClipboardCon
 }
 
 fn clipboard_packet_authorized(layout: &LayoutState, packet: &ClipboardPacket) -> bool {
+    clipboard_packet_authorized_fields(
+        layout,
+        &packet.cluster_id,
+        &packet.pair_secret,
+        &packet.origin_transport_public_key,
+        &packet.origin_id,
+    )
+}
+
+/// Shared by the clipboard and the diagnostics upload: both come from the same
+/// paired controller over the same encrypted stream and carry the same
+/// credentials, so they must not drift apart.
+fn clipboard_packet_authorized_fields(
+    layout: &LayoutState,
+    cluster_id: &str,
+    pair_secret: &str,
+    origin_transport_public_key: &str,
+    origin_id: &str,
+) -> bool {
     if layout.cluster_id.trim().is_empty()
         || layout.pair_secret.trim().is_empty()
-        || packet.cluster_id != layout.cluster_id
-        || packet.pair_secret != layout.pair_secret
+        || cluster_id != layout.cluster_id
+        || pair_secret != layout.pair_secret
     {
         return false;
     }
@@ -4853,12 +4955,12 @@ fn clipboard_packet_authorized(layout: &LayoutState, packet: &ClipboardPacket) -
         // controller whose derived peer id had drifted (LAN IP change) even
         // though its key was unchanged — which is why input kept working while
         // clipboard from that controller stopped.
-        let key = packet.origin_transport_public_key.trim();
+        let key = origin_transport_public_key.trim();
         return layout.paired_controllers.iter().any(|controller| {
             (!key.is_empty() && controller.transport_public_key == key)
-                || controller.id == packet.origin_id
+                || controller.id == origin_id
         }) || (layout.paired_controllers.len() == 1
-            && packet.origin_id == "local-device"
+            && origin_id == "local-device"
             && !key.is_empty());
     }
 
@@ -5765,6 +5867,25 @@ struct DiscoveryPacket {
     pair_secret: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pairing_error: Option<String>,
+}
+
+/// Mirrors `packet::DiagnosticsPacket` in the Android receiver crate.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DiagnosticsPacket {
+    protocol: String,
+    #[serde(default)]
+    origin_id: String,
+    #[serde(default)]
+    origin_transport_public_key: String,
+    #[serde(default)]
+    cluster_id: String,
+    #[serde(default)]
+    pair_secret: String,
+    #[serde(default)]
+    file_name: String,
+    #[serde(default)]
+    text: String,
 }
 
 #[derive(Default)]
@@ -7490,6 +7611,71 @@ mod tests {
         assert!(!clipboard_packet_authorized(&layout, &packet));
         packet.origin_id = "server-10-0-0-1".into();
         assert!(clipboard_packet_authorized(&layout, &packet));
+    }
+
+    #[test]
+    fn android_diagnostics_upload_lands_next_to_our_log() {
+        let mut layout = test_layout();
+        layout.machine_role = "client".into();
+        layout.cluster_id = "cluster-diag".into();
+        layout.pair_secret = "secret-diag".into();
+        layout.paired_controllers = vec![PairedController {
+            id: "peer-android-1".into(),
+            name: "TB371FC".into(),
+            host: "android-1".into(),
+            ip: "192.168.1.8".into(),
+            transport_public_key: "android-key".into(),
+            protocol_version: quic_transport::PROTOCOL_VERSION,
+            cluster_id: "cluster-diag".into(),
+            paired_at_ms: 0,
+        }];
+
+        let packet = DiagnosticsPacket {
+            protocol: DIAGNOSTICS_PROTOCOL.into(),
+            origin_id: "peer-android-1".into(),
+            origin_transport_public_key: "android-key".into(),
+            cluster_id: "cluster-diag".into(),
+            pair_secret: "secret-diag".into(),
+            file_name: "mykvm-android.log".into(),
+            text: "line one\nline two".into(),
+        };
+        let payload = rmp_serde::to_vec_named(&packet).expect("encode diagnostics");
+
+        let dir = std::env::temp_dir().join(format!("mykvm-diagnostics-test-{}", now_ms()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        assert!(handle_diagnostics_packet(&payload, &layout, Some(&dir)));
+
+        let saved = dir.join("android-diagnostics-peer-android-1.log");
+        let body = fs::read_to_string(&saved).expect("diagnostics file written");
+        assert!(body.contains("line one"));
+        assert!(body.contains("line two"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn android_diagnostics_upload_with_a_wrong_secret_is_dropped() {
+        let mut layout = test_layout();
+        layout.machine_role = "client".into();
+        layout.cluster_id = "cluster-diag".into();
+        layout.pair_secret = "secret-diag".into();
+
+        let packet = DiagnosticsPacket {
+            protocol: DIAGNOSTICS_PROTOCOL.into(),
+            origin_id: "peer-stranger".into(),
+            origin_transport_public_key: "other-key".into(),
+            cluster_id: "cluster-diag".into(),
+            pair_secret: "guessed".into(),
+            file_name: "mykvm-android.log".into(),
+            text: "should not be written".into(),
+        };
+        let payload = rmp_serde::to_vec_named(&packet).expect("encode diagnostics");
+
+        let dir = std::env::temp_dir().join(format!("mykvm-diagnostics-reject-{}", now_ms()));
+        fs::create_dir_all(&dir).expect("create temp dir");
+        // Recognised as a diagnostics upload, but rejected: no file appears.
+        assert!(handle_diagnostics_packet(&payload, &layout, Some(&dir)));
+        assert_eq!(fs::read_dir(&dir).expect("read dir").count(), 0);
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

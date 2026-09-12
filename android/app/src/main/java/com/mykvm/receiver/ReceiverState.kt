@@ -32,6 +32,13 @@ data class ReceiverUiState(
     val quicPort: Int = 0,
     val discoveryPort: Int = 0,
     val lastError: String? = null,
+
+    /** Battery-optimisation exemption; without it an aggressive ROM may kill us. */
+    val batteryExempt: Boolean = false,
+    /** Contents of the diagnostics log, or null while the viewer is closed. */
+    val logText: String? = null,
+    /** One-line result of the last log action ("已发送到电脑", an error, ...). */
+    val logNotice: String? = null,
 )
 
 /**

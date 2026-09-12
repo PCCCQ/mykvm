@@ -213,6 +213,37 @@ pub struct IncomingDiscovery {
 }
 
 // ---------------------------------------------------------------------------
+// Diagnostics plane
+// ---------------------------------------------------------------------------
+
+pub const DIAGNOSTICS_PROTOCOL: &str = "mykvm.diagnostics.v1";
+
+/// Mirrors `lib::DiagnosticsPacket`. One-shot upload of this device's log file
+/// so a tester can hand the desktop everything it needs in a single tap.
+///
+/// It travels on the same encrypted QUIC stream as `pair-confirm` and the
+/// clipboard, and carries the pairing credentials so the desktop can reject a
+/// stranger's upload instead of writing junk into its log directory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DiagnosticsPacket {
+    pub protocol: String,
+    #[serde(default)]
+    pub origin_id: String,
+    #[serde(default)]
+    pub origin_transport_public_key: String,
+    #[serde(default)]
+    pub cluster_id: String,
+    #[serde(default)]
+    pub pair_secret: String,
+    /// Device-side file name, so several devices can be told apart on the PC.
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+// ---------------------------------------------------------------------------
 // Persisted receiver state
 // ---------------------------------------------------------------------------
 
@@ -281,6 +312,41 @@ mod tests {
         let packet: InputPacket = serde_json::from_str(json).unwrap();
         assert_eq!(packet.target_device_id, "peer-pixel8-abc");
         assert_eq!(packet.protocol, INPUT_PROTOCOL);
+    }
+
+    /// MessagePack encodes field *names*, so a rename on either side would
+    /// silently drop the upload instead of erroring. Pin them here.
+    #[test]
+    fn diagnostics_packet_matches_desktop_field_names() {
+        let packet = DiagnosticsPacket {
+            protocol: DIAGNOSTICS_PROTOCOL.into(),
+            origin_id: "peer-android-1".into(),
+            origin_transport_public_key: "key".into(),
+            cluster_id: "cluster-1".into(),
+            pair_secret: "secret-1".into(),
+            file_name: "mykvm-android.log".into(),
+            text: "hello".into(),
+        };
+
+        // rmp_serde::to_vec_named produces a map with the serde names; decoding
+        // the equivalent JSON pins the same spellings the desktop reads.
+        let json = serde_json::to_value(&packet).unwrap();
+        for field in [
+            "protocol",
+            "originId",
+            "originTransportPublicKey",
+            "clusterId",
+            "pairSecret",
+            "fileName",
+            "text",
+        ] {
+            assert!(json.get(field).is_some(), "missing wire field {field}");
+        }
+
+        let bytes = rmp_serde::to_vec_named(&packet).unwrap();
+        let decoded: DiagnosticsPacket = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(decoded.protocol, DIAGNOSTICS_PROTOCOL);
+        assert_eq!(decoded.text, "hello");
     }
 
     #[test]

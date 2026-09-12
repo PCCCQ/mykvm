@@ -11,9 +11,12 @@ use std::sync::mpsc::{self, Receiver as MpscReceiver, Sender};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::discovery::{spawn_discovery, DiscoveryHandle, ReceiverConfig};
+use crate::discovery::{spawn_discovery, DiscoveryHandle, ReceiverConfig, SharedControllerEndpoint};
 use crate::events::{EventSink, ReceiverEvent};
-use crate::packet::{ClipboardPacket, InputPacket, CLIPBOARD_PROTOCOL, INPUT_PROTOCOL};
+use crate::packet::{
+    ClipboardPacket, DiagnosticsPacket, InputPacket, Screen, CLIPBOARD_PROTOCOL,
+    DIAGNOSTICS_PROTOCOL, INPUT_PROTOCOL,
+};
 use crate::pairing::{complete_pairing_from_confirm, SharedChallenge};
 use crate::state::{input_authorized, now_ms, OriginCache, ReceiverLayout};
 use crate::quic_transport;
@@ -38,6 +41,11 @@ pub struct Receiver {
     transport: quic_transport::TransportHandle,
     discovery: Option<DiscoveryHandle>,
     events_rx: Option<MpscReceiver<ReceiverEvent>>,
+    /// Where the paired desktop was last seen, for the diagnostics upload.
+    controller_endpoint: SharedControllerEndpoint,
+    /// Guards `stop()` so the explicit call in `nativeStop` and the `Drop` that
+    /// follows it cannot shut the endpoint down (and log) twice.
+    stopped: bool,
 }
 
 impl Receiver {
@@ -78,13 +86,30 @@ impl Receiver {
         let transport =
             quic_transport::start(startup.quic_port, startup.identity_dir, on_datagram, on_stream)?;
 
+        // The screen lives behind the config so a rotation or a PC-mode window
+        // resize can re-advertise a new size *without* tearing the QUIC endpoint
+        // down. Restarting used to drop every live connection, which the desktop
+        // then logged as "the server refused to accept a new connection".
+        let screen = Arc::new(Mutex::new(Screen {
+            id: startup.screen_id.clone(),
+            device_id: startup.stable_id.clone(),
+            name: startup.device_name.clone(),
+            x: 0,
+            y: 0,
+            width: startup.screen_width,
+            height: startup.screen_height,
+            // 1.0 so the coordinates the desktop sends are already device
+            // pixels and the injector needs no scaling.
+            scale: 1.0,
+            is_primary: true,
+        }));
+
         let config = ReceiverConfig {
             device_name: startup.device_name,
             stable_id: startup.stable_id,
             app_version: startup.app_version,
             screen_id: startup.screen_id,
-            screen_width: startup.screen_width,
-            screen_height: startup.screen_height,
+            screen,
             discovery_port: startup.discovery_port,
             // Advertise what we actually bound, not what we asked for.
             quic_port: transport.port(),
@@ -99,10 +124,12 @@ impl Receiver {
             })
         };
 
+        let controller_endpoint: SharedControllerEndpoint = Arc::new(Mutex::new(None));
         let discovery = spawn_discovery(
             config.clone(),
             Arc::clone(&layout),
             Arc::clone(&challenge),
+            Arc::clone(&controller_endpoint),
             events,
         )?;
 
@@ -120,9 +147,52 @@ impl Receiver {
             transport,
             discovery: Some(discovery),
             events_rx: Some(events_rx),
+            controller_endpoint,
+            stopped: false,
         })
     }
 
+    /// Re-advertises a new screen size in place (rotation, PC-mode resize).
+    pub fn set_screen_size(&self, width: i32, height: i32) {
+        self.config.set_screen_size(width, height);
+    }
+
+    /// Pushes this device's diagnostics log to the paired desktop.
+    ///
+    /// One-shot and best effort: the desktop writes it next to its own log so a
+    /// tester gets the phone's side of the story without a cable.
+    pub fn send_diagnostics(&self, file_name: &str, text: &str) -> Result<(), String> {
+        let endpoint = self
+            .controller_endpoint
+            .lock()
+            .map_err(|_| "controller endpoint lock poisoned".to_string())?
+            .clone()
+            .ok_or_else(|| "还没有看到已配对的电脑，请先让电脑连接一次".to_string())?;
+        let layout = self.layout_snapshot();
+        if !layout.is_paired() {
+            return Err("尚未配对，无法发送日志".into());
+        }
+
+        let packet = DiagnosticsPacket {
+            protocol: DIAGNOSTICS_PROTOCOL.to_string(),
+            // The derived peer id, i.e. the same id the desktop knows us by.
+            origin_id: crate::discovery::local_peer_id(&self.config.stable_id),
+            origin_transport_public_key: self.config.transport_public_key.clone(),
+            cluster_id: layout.cluster_id.clone(),
+            pair_secret: layout.pair_secret.clone(),
+            file_name: file_name.to_string(),
+            text: text.to_string(),
+        };
+        let payload = rmp_serde::to_vec_named(&packet)
+            .map_err(|error| format!("failed to encode diagnostics: {error}"))?;
+
+        let peer = self.transport.peer(
+            format!("{}:{}", endpoint.ip, endpoint.quic_port),
+            endpoint.transport_public_key.clone(),
+            endpoint.protocol_version,
+        );
+        self.transport.send_stream_expect_ack(peer, payload)
+    }
 
     pub fn layout_snapshot(&self) -> ReceiverLayout {
         self.layout
@@ -148,7 +218,15 @@ impl Receiver {
     pub fn take_events(&mut self) -> Option<MpscReceiver<ReceiverEvent>> {
         self.events_rx.take()
     }
+
+    /// Idempotent: `Drop` runs right after the explicit stop from `nativeStop`,
+    /// and the second call used to log "receiver stopped" a second time (which
+    /// made a single configuration restart look like two shutdowns in the log).
     pub fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
         if let Some(mut discovery) = self.discovery.take() {
             discovery.stop();
         }

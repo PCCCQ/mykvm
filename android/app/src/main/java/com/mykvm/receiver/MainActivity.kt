@@ -1,12 +1,14 @@
 package com.mykvm.receiver
 
 import android.Manifest
+import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
+import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
@@ -18,7 +20,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.core.content.ContextCompat
 import com.mykvm.receiver.core.NativeCore
+import com.mykvm.receiver.diag.Diag
 import com.mykvm.receiver.ui.ReceiverScreen
+import org.json.JSONObject
 
 class MainActivity : ComponentActivity() {
 
@@ -28,11 +32,14 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         NativeCore.ensureLoaded()
+        Diag.init(this)
         val prefs = Prefs(this)
         ReceiverState.update {
             it.copy(
                 keyboardPassthrough = prefs.keyboardPassthrough,
                 imePermission = com.mykvm.receiver.input.ImeSuppressor.hasPermission(this),
+                batteryExempt = KeepAlive.isExemptFromBatteryOptimizations(this),
+                clipboardSync = prefs.clipboardSync,
             )
         }
         requestNotificationPermissionIfNeeded()
@@ -77,6 +84,20 @@ class MainActivity : ComponentActivity() {
                             Prefs(this).inputMode = mode
                             ReceiverState.update { it.copy(inputMode = mode) }
                         },
+                        onViewLog = {
+                            val text = Diag.readText()
+                            ReceiverState.update { it.copy(logText = text) }
+                            if (text.isBlank()) toast("日志还是空的")
+                        },
+                        onClearLog = {
+                            Diag.clear()
+                            ReceiverState.update {
+                                it.copy(logText = Diag.readText(), logNotice = "日志已清空")
+                            }
+                        },
+                        onShareLog = ::shareLog,
+                        onSendLog = ::sendLogToDesktop,
+                        onRequestBatteryExemption = ::requestBatteryExemption,
                         onUnpair = {
                             Prefs(this).unpair()
                             // Re-announce at once so the desktop drops us out of
@@ -94,10 +115,14 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        // Overlay and Shizuku permissions can change while we are backgrounded.
+        // Overlay, Shizuku and the battery-exemption state can all change while
+        // we are backgrounded, so re-read them every time the screen comes back.
         ShizukuStatus.refresh(this)
+        ReceiverState.update { it.copy(batteryExempt = KeepAlive.isExemptFromBatteryOptimizations(this)) }
         if (ReceiverState.current.running) {
-            startService(Intent(this, KvmService::class.java))
+            // Same entry point as every other restart path, so the foreground
+            // service obligation is handled in exactly one place.
+            KvmService.start(this)
         }
     }
 
@@ -125,6 +150,81 @@ class MainActivity : ComponentActivity() {
         } else {
             startActivity(Intent(Intent.ACTION_VIEW, Uri.parse("https://shizuku.rikka.app/")))
         }
+    }
+
+    /** Re-reads the log so the in-app viewer shows the latest lines. */
+    private fun viewLog() {
+        val text = Diag.readText()
+        ReceiverState.update { it.copy(logText = text) }
+    }
+
+    private fun shareLog() {
+        val intent = Diag.shareIntent(this)
+        if (intent == null) {
+            toast("无法分享日志")
+            return
+        }
+        try {
+            startActivity(Intent.createChooser(intent, "分享 MyKVM 日志"))
+        } catch (error: ActivityNotFoundException) {
+            toast("没有可用的分享应用")
+        }
+    }
+
+    /**
+     * The one-tap path the user actually wants while testing: push the log to
+     * the paired desktop, which stores it next to its own log file.
+     */
+    private fun sendLogToDesktop() {
+        val text = Diag.readText()
+        if (text.isBlank()) {
+            ReceiverState.update { it.copy(logNotice = "日志还是空的") }
+            toast("日志还是空的")
+            return
+        }
+
+        val result = try {
+            JSONObject(NativeCore.nativeSendDiagnostics(Diag.uploadName(), text))
+        } catch (error: Throwable) {
+            JSONObject().put("ok", false).put("error", error.message ?: "发送失败")
+        }
+
+        val notice = if (result.optBoolean("ok")) {
+            "已发送到电脑（${result.optInt("bytes")} 字节），电脑端日志目录里可查看"
+        } else {
+            result.optString("error", "发送失败")
+        }
+        Diag.info("diagnostics upload: $notice")
+        ReceiverState.update { it.copy(logNotice = notice) }
+        toast(notice)
+        viewLog()
+    }
+
+    /** Opens the system battery-optimisation exemption dialog. */
+    private fun requestBatteryExemption() {
+        if (KeepAlive.isExemptFromBatteryOptimizations(this)) {
+            ReceiverState.update { it.copy(batteryExempt = true) }
+            toast("已经在白名单里")
+            return
+        }
+        val direct = Intent(
+            Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+            Uri.parse("package:$packageName"),
+        )
+        try {
+            startActivity(direct)
+        } catch (error: ActivityNotFoundException) {
+            // Some ROMs only expose the full list.
+            try {
+                startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            } catch (fallback: Throwable) {
+                toast("系统没有提供电池优化设置")
+            }
+        }
+    }
+
+    private fun toast(message: String) {
+        Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
     }
 
     private fun requestOverlayPermission() {

@@ -19,6 +19,14 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
+    <!-- Lets the user exempt the receiver from battery optimisation. On an
+         aggressive ROM losing this is the difference between "works all day"
+         and "the desktop loses the tablet whenever the screen sleeps".
+         Sideloaded, so the Play policy on this permission does not apply. -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:ignore="BatteryLife" />
+
     <!-- Lets the receiver take the tablet's IME out of the input path while it
          runs; without it injected key events get composed as pinyin instead of
          reaching the app. Granted once over adb:
@@ -41,6 +49,18 @@
 
         <!-- Shizuku hands us a shell-uid binder so we can reach
              InputManager.injectInputEvent. -->
+        <!-- The diagnostics log is shared as a content:// URI; FileProvider is
+             the only way to hand a file to another app on Android 7+. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
         <provider
             android:name="rikka.shizuku.ShizukuProvider"
             android:authorities="${applicationId}.shizuku"
@@ -58,6 +78,19 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- Brings the receiver back after a reboot or the keep-alive alarm.
+             Without it an aggressive ROM killing the process ends the session
+             until the user opens the app again. -->
+        <receiver
+            android:name=".KeepAliveReceiver"
+            android:enabled="true"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="com.mykvm.receiver.KEEP_ALIVE" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".KvmService"

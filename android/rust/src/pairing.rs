@@ -45,9 +45,16 @@ impl PairingChallenge {
 
 pub type SharedChallenge = Arc<Mutex<Option<PairingChallenge>>>;
 
-/// A fresh challenge is accepted when we have no pairing yet, or when the
-/// requester looks like the controller we already paired with (so a rotated
-/// transport certificate does not trap the receiver behind a stale key).
+/// Starts the handshake for a desktop that wants to pair (or re-pair) with us.
+///
+/// A *paired* receiver still accepts a fresh request. The authorization in this
+/// protocol is the code: it is shown on this device's screen and typed on the
+/// desktop, so an attacker on the LAN cannot finish a pairing without reading
+/// the screen. Refusing while already paired used to make repair impossible --
+/// once the stored controller record went stale (the desktop rotates its
+/// self-signed certificate on reinstall, or its IP moves between Wi-Fi and USB
+/// tethering), the desktop's "pair" button timed out with "no pairing challenge
+/// received" and the only way out was wiping the pairing on both sides.
 pub fn begin_pairing_challenge(
     challenge: &SharedChallenge,
     layout: &ReceiverLayout,
@@ -58,14 +65,6 @@ pub fn begin_pairing_challenge(
         return None;
     }
     if requester.machine_role != "server" {
-        return None;
-    }
-
-    let requester_already_known = layout
-        .paired_controllers
-        .iter()
-        .any(|controller| can_repair_with_peer(controller, requester));
-    if !layout.pairing_required() && !requester_already_known {
         return None;
     }
 
@@ -181,14 +180,21 @@ pub fn complete_pairing_from_confirm(
     Ok(snapshot)
 }
 
-fn can_repair_with_peer(controller: &PairedController, peer: &LanPeer) -> bool {
-    if identity_matches_peer(controller, peer) {
-        return true;
-    }
-    text_matches(&controller.name, &peer.name)
+/// The stricter twin of [`can_repair_with_peer`], for the paths that *write* to
+/// the stored record.
+///
+/// `can_repair_with_peer` deliberately also accepts an IP-only match so a user
+/// can re-pair a desktop whose hostname they changed. That is fine for deciding
+/// whether to show a verification code, but it is not good enough to rewrite
+/// stored credentials: two MyKVM instances sharing one PC (the desktop app plus
+/// a test controller) have the same IP, and so does every device behind a NAT
+/// that happens to reuse the address. A write therefore requires an identity or
+/// hostname match, both of which survive a certificate rotation and an IP move.
+pub fn can_refresh_controller_identity(controller: &PairedController, peer: &LanPeer) -> bool {
+    identity_matches_peer(controller, peer)
+        || text_matches(&controller.name, &peer.name)
         || same_host(&controller.host, &peer.host)
         || same_host(&peer.host, &controller.host)
-        || text_matches(&controller.ip, &peer.ip)
 }
 
 pub fn identity_matches_peer(controller: &PairedController, peer: &LanPeer) -> bool {
@@ -265,6 +271,33 @@ mod tests {
         let first = begin_pairing_challenge(&challenge, &layout, &peer("p1", "server", "k1"), "1.2.3.4".into()).unwrap();
         let second = begin_pairing_challenge(&challenge, &layout, &peer("p1", "server", "k1"), "1.2.3.4".into()).unwrap();
         assert_eq!(first.code, second.code);
+    }
+
+    /// Re-pairing has to stay possible: once the stored controller record is
+    /// stale the desktop's pair button is the user's only way back, and it can
+    /// only work if the receiver still mints a challenge while paired.
+    #[test]
+    fn paired_client_still_accepts_a_repair_request() {
+        let challenge: SharedChallenge = Arc::new(Mutex::new(None));
+        let mut layout = unpaired_layout();
+        layout.cluster_id = "cluster-before-repair".into();
+        layout.pair_secret = "secret-before-repair".into();
+        layout.paired_controllers.push(crate::packet::PairedController {
+            id: "peer-desktop".into(),
+            name: "Desktop".into(),
+            host: "desktop".into(),
+            ip: "192.168.1.10".into(),
+            transport_public_key: "stale-key".into(),
+            protocol_version: 1,
+            cluster_id: "cluster-before-repair".into(),
+            paired_at_ms: 0,
+        });
+        assert!(!layout.pairing_required());
+
+        let requester = peer("peer-desktop", "server", "rotated-key");
+        let issued = begin_pairing_challenge(&challenge, &layout, &requester, "192.168.1.10".into());
+        assert!(issued.is_some(), "a paired client must still accept a repair request");
+        assert_eq!(issued.unwrap().requester_id, "peer-desktop");
     }
 
     #[test]

@@ -10,6 +10,11 @@ class MyKvmApp : Application() {
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
+        // The log file exists from the first moment of the process, so anything
+        // the service does on startup is already captured.
+        com.mykvm.receiver.diag.Diag.init(this)
+        // Once per process, so the log always starts with the build that made it.
+        com.mykvm.receiver.diag.Diag.info("process started (version ${BuildConfig.VERSION_NAME})")
 
         // Seed the UI state so the first frame shows the real device name
         // instead of a blank string; the service only fills it in once it runs.
@@ -24,6 +29,7 @@ class MyKvmApp : Application() {
                 imePermission = com.mykvm.receiver.input.ImeSuppressor.hasPermission(this),
                 paired = prefs.isPaired,
                 connectedController = prefs.controllerName,
+                batteryExempt = KeepAlive.isExemptFromBatteryOptimizations(this),
             )
         }
         // Recover from a previous run that died while keyboard passthrough was on:

@@ -22,7 +22,7 @@ use crate::packet::{
     DISCOVERY_PROTOCOL,
 };
 use crate::events::{EventSink, ReceiverEvent};
-use crate::pairing::{begin_pairing_challenge, SharedChallenge};
+use crate::pairing::{begin_pairing_challenge, can_refresh_controller_identity, SharedChallenge};
 use crate::state::{now_ms, ReceiverLayout};
 
 /// Ports scanned upward from the base, mirroring `DISCOVERY_PORT_SPAN`.
@@ -51,8 +51,10 @@ pub struct ReceiverConfig {
     pub stable_id: String,
     pub app_version: String,
     pub screen_id: String,
-    pub screen_width: i32,
-    pub screen_height: i32,
+    /// Shared so the receiver can re-advertise a new size without tearing
+    /// down the QUIC endpoint (which would drop every connection and make
+    /// the desktop see CONNECTION_REFUSED).
+    pub screen: Arc<Mutex<Screen>>,
     pub discovery_port: u16,
     pub quic_port: u16,
     pub transport_public_key: String,
@@ -60,26 +62,59 @@ pub struct ReceiverConfig {
 }
 
 impl ReceiverConfig {
+    /// Current screen geometry, copied out under the lock.
     pub fn screen(&self) -> Screen {
-        Screen {
-            id: self.screen_id.clone(),
-            device_id: self.stable_id.clone(),
-            name: self.device_name.clone(),
-            x: 0,
-            y: 0,
-            width: self.screen_width,
-            height: self.screen_height,
-            // 1.0 so the coordinates the desktop sends are already device
-            // pixels and the injector needs no scaling.
-            scale: 1.0,
-            is_primary: true,
+        match self.screen.lock() {
+            Ok(screen) => screen.clone(),
+            // A poisoned lock still holds valid data; the receiver must not
+            // stop advertising a screen because something panicked once.
+            Err(poisoned) => poisoned.into_inner().clone(),
         }
+    }
+
+    /// Re-advertises a new size.
+    ///
+    /// Callers update this instead of restarting the receiver: a restart tears
+    /// down the QUIC endpoint, which drops every live connection and makes the
+    /// desktop log "the server refused to accept a new connection" until the
+    /// new endpoint is up.
+    pub fn set_screen_size(&self, width: i32, height: i32) {
+        if width <= 0 || height <= 0 {
+            return;
+        }
+        let mut screen = match self.screen.lock() {
+            Ok(screen) => screen,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if screen.width == width && screen.height == height {
+            return;
+        }
+        screen.width = width;
+        screen.height = height;
+        log::info!("advertised screen resized to {width}x{height}");
     }
 
     pub fn to_peer_screen(&self) -> LanPeerScreen {
         screen_to_peer_screen(&self.screen())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Where the paired desktop can be reached
+// ---------------------------------------------------------------------------
+
+/// The address we would dial to push something *to* the desktop (today: the
+/// diagnostics upload). Discovery already learns every field of this; before,
+/// they were thrown away as soon as the packet was handled.
+#[derive(Debug, Clone)]
+pub struct ControllerEndpoint {
+    pub ip: String,
+    pub quic_port: u16,
+    pub transport_public_key: String,
+    pub protocol_version: u16,
+}
+
+pub type SharedControllerEndpoint = Arc<Mutex<Option<ControllerEndpoint>>>;
 
 // ---------------------------------------------------------------------------
 // Events surfaced to the Kotlin layer (see events.rs)
@@ -428,6 +463,7 @@ pub fn spawn_discovery(
     config: ReceiverConfig,
     layout: Arc<Mutex<ReceiverLayout>>,
     challenge: SharedChallenge,
+    endpoint: SharedControllerEndpoint,
     events: EventSink,
 ) -> Result<DiscoveryHandle, String> {
     let (socket, actual_port) = bind_available_udp_port(config.discovery_port)?;
@@ -440,7 +476,15 @@ pub fn spawn_discovery(
         .spawn(move || {
             let mut config = config;
             config.discovery_port = actual_port;
-            run_discovery(config, layout, challenge, events, socket, stop_for_thread);
+            run_discovery(
+                config,
+                layout,
+                challenge,
+                endpoint,
+                events,
+                socket,
+                stop_for_thread,
+            );
         })
         .map_err(|error| format!("failed to spawn discovery thread: {error}"))?;
 
@@ -454,6 +498,7 @@ fn run_discovery(
     config: ReceiverConfig,
     layout: Arc<Mutex<ReceiverLayout>>,
     challenge: SharedChallenge,
+    endpoint: SharedControllerEndpoint,
     events: EventSink,
     socket: UdpSocket,
     stop: Arc<AtomicBool>,
@@ -511,6 +556,14 @@ fn run_discovery(
             continue;
         };
         let reply_peer = local_peer(&config, &current, &local_ip);
+
+        // Keep the stored controller record -- and the address we would dial to
+        // reach the desktop -- in sync with the peer actually on the wire. The
+        // desktop regenerates its self-signed certificate when its key file is
+        // missing (update/reinstall) and its IP moves between Wi-Fi and USB
+        // tethering; without this sync the stored record goes stale, every input
+        // packet is rejected, and the user is forced to re-pair.
+        adopt_controller(&layout, &incoming.peer, &endpoint, &events, &mut online_controllers);
 
         log::debug!(
             "discovery {} from {} peer={} role={} pairing_required={}",
@@ -571,7 +624,6 @@ fn run_discovery(
                 log::warn!("ignored a plaintext pair-confirm from {source}");
             }
             "announce" | "probe" => {
-                remember_controller(&mut online_controllers, &current, &incoming.peer, &events);
                 if should_reply_to_discovery(&current, &incoming.peer) {
                     match encode_discovery_payload(
                         "reply",
@@ -587,9 +639,7 @@ fn run_discovery(
                     }
                 }
             }
-            "reply" | "pair-challenge" => {
-                remember_controller(&mut online_controllers, &current, &incoming.peer, &events);
-            }
+            "reply" | "pair-challenge" => {}
             other => log::debug!("ignoring discovery packet kind={other} from {source}"),
         }
     }
@@ -646,21 +696,118 @@ fn expire_pairing_code(challenge: &SharedChallenge, events: &EventSink) {
         events(ReceiverEvent::PairingCleared);
     }
 }
-/// Track which paired controllers are currently reachable so the UI can show a
-/// connected/disconnected state.
-fn remember_controller(
-    online: &mut Vec<String>,
-    layout: &ReceiverLayout,
+
+/// Mirrors the desktop's `refresh_paired_controller_keys`.
+///
+/// Two jobs, both about the same peer:
+///   * refresh the stored `PairedController` (id / key / host / ip / name) so a
+///     rotated certificate or a moved IP does not lock input out, and
+///   * remember the address to dial for the diagnostics upload.
+/// Plus the presence bookkeeping the UI uses to show "desktop connected".
+///
+/// The refresh is gated on [`can_refresh_controller_identity`], deliberately
+/// stricter than `can_repair_with_peer`: rewriting stored credentials on an
+/// IP-only match would let a second MyKVM instance on the same PC take over the
+/// pairing record.
+fn adopt_controller(
+    layout: &Arc<Mutex<ReceiverLayout>>,
     peer: &LanPeer,
+    endpoint: &SharedControllerEndpoint,
     events: &EventSink,
+    online: &mut Vec<String>,
 ) {
-    if !is_paired_controller(layout, peer) {
+    // Only the desktop (a server) is ever a controller for us.
+    if peer.machine_role != "server" {
         return;
     }
-    if !online.contains(&peer.id) {
-        online.push(peer.id.clone());
+    if peer.ip.trim().is_empty() || peer.quic_port == 0 {
+        return;
+    }
+
+    let Ok(mut layout) = layout.lock() else {
+        return;
+    };
+    if layout.machine_role != "client" {
+        return;
+    }
+
+    let index = layout
+        .paired_controllers
+        .iter()
+        .position(|controller| can_refresh_controller_identity(controller, peer));
+
+    // Remember where to dial even when the stored record no longer matches: a
+    // desktop whose certificate rotated *and* whose hostname changed is exactly
+    // the case where the user needs to re-pair, and re-pairing is also when they
+    // want to send us its logs. Presenting our cluster id is hint enough, and the
+    // desktop still validates the credentials on receipt.
+    let cluster_matches =
+        !layout.cluster_id.trim().is_empty() && peer.cluster_id == layout.cluster_id;
+    if (index.is_some() || cluster_matches) && !peer.transport_public_key.trim().is_empty() {
+        if let Ok(mut slot) = endpoint.lock() {
+            *slot = Some(ControllerEndpoint {
+                ip: peer.ip.clone(),
+                quic_port: peer.quic_port,
+                transport_public_key: peer.transport_public_key.clone(),
+                protocol_version: peer.protocol_version,
+            });
+        }
+    }
+
+    let Some(index) = index else {
+        return;
+    };
+    let controller = &mut layout.paired_controllers[index];
+
+    let mut changed = false;
+    let set = |slot: &mut String, value: &str| {
+        let value = value.trim();
+        if !value.is_empty() && slot.as_str() != value {
+            *slot = value.to_string();
+            true
+        } else {
+            false
+        }
+    };
+    changed |= set(&mut controller.name, &peer.name);
+    changed |= set(&mut controller.host, &peer.host);
+    changed |= set(&mut controller.ip, &peer.ip);
+    changed |= set(&mut controller.id, &peer.id);
+    changed |= set(
+        &mut controller.transport_public_key,
+        &peer.transport_public_key,
+    );
+    if peer.protocol_version != 0 && controller.protocol_version != peer.protocol_version {
+        controller.protocol_version = peer.protocol_version;
+        changed = true;
+    }
+
+    let controller_id = controller.id.clone();
+    let controller_name = if controller.name.trim().is_empty() {
+        controller_id.clone()
+    } else {
+        controller.name.clone()
+    };
+    let snapshot = layout.clone();
+    drop(layout);
+
+    if !online.contains(&controller_id) {
+        online.push(controller_id.clone());
         events(ReceiverEvent::PeerPresence {
             peer_ids: online.clone(),
+        });
+    }
+    if changed {
+        log::info!(
+            "paired controller {controller_id} identity refreshed from {} (key/host/id changed)",
+            peer.ip
+        );
+        // Reuse the pairing event: Kotlin persists the layout verbatim, which is
+        // exactly what a refreshed record needs.
+        events(ReceiverEvent::Paired {
+            controller_id,
+            controller_name,
+            layout: snapshot,
         });
     }
 }
@@ -675,13 +822,162 @@ mod tests {
             stable_id: "android-abcd1234".into(),
             app_version: "0.1.0".into(),
             screen_id: "android-screen-1".into(),
-            screen_width: 1080,
-            screen_height: 2400,
+            screen: Arc::new(Mutex::new(Screen {
+                id: "android-screen-1".into(),
+                device_id: "android-abcd1234".into(),
+                name: "Pixel 8".into(),
+                x: 0,
+                y: 0,
+                width: 1080,
+                height: 2400,
+                scale: 1.0,
+                is_primary: true,
+            })),
             discovery_port: 47833,
             quic_port: 47834,
             transport_public_key: "key".into(),
             protocol_version: crate::packet::PROTOCOL_VERSION,
         }
+    }
+
+    #[test]
+    fn resizing_the_shared_screen_is_visible_to_the_next_announce() {
+        let config = test_config();
+        assert_eq!(config.screen().width, 1080);
+
+        config.set_screen_size(2944, 1840);
+        assert_eq!(config.screen().width, 2944);
+        assert_eq!(config.screen().height, 1840);
+        assert_eq!(config.to_peer_screen().width, 2944);
+
+        // Garbage sizes must not be advertised.
+        config.set_screen_size(0, -3);
+        assert_eq!(config.screen().width, 2944);
+    }
+
+    fn paired_layout() -> ReceiverLayout {
+        let mut layout = ReceiverLayout::new_unpaired();
+        layout.cluster_id = "cluster-1".into();
+        layout.pair_secret = "secret-1".into();
+        layout.paired_controllers.push(crate::packet::PairedController {
+            id: "peer-desktop-192-168-1-7".into(),
+            name: "Desktop".into(),
+            host: "desktop".into(),
+            ip: "192.168.1.7".into(),
+            transport_public_key: "old-key".into(),
+            protocol_version: 1,
+            cluster_id: "cluster-1".into(),
+            paired_at_ms: 0,
+        });
+        layout
+    }
+
+    fn desktop_peer(id: &str, ip: &str, key: &str) -> LanPeer {
+        LanPeer {
+            id: id.into(),
+            name: "Desktop".into(),
+            platform: "windows".into(),
+            machine_role: "server".into(),
+            cluster_id: "cluster-1".into(),
+            pairing_required: false,
+            host: "desktop".into(),
+            ip: ip.into(),
+            transport_port: 47833,
+            quic_port: 47834,
+            transport_public_key: key.into(),
+            protocol_version: crate::packet::PROTOCOL_VERSION,
+            screen_count: 0,
+            input_ready: true,
+            upgrading: false,
+            screens: vec![],
+            app_version: "0.1.0".into(),
+            last_seen_ms: 0,
+        }
+    }
+
+    fn no_events() -> EventSink {
+        Arc::new(|_| {})
+    }
+
+    /// The Android twin of the desktop's `refresh_paired_controller_keys`: a
+    /// rotated certificate or a moved IP must not leave input locked out.
+    #[test]
+    fn a_rotated_controller_identity_is_adopted_in_place() {
+        let layout = Arc::new(Mutex::new(paired_layout()));
+        let endpoint: SharedControllerEndpoint = Arc::new(Mutex::new(None));
+        let mut online = Vec::new();
+
+        adopt_controller(
+            &layout,
+            &desktop_peer("peer-desktop-192-168-1-9", "192.168.1.9", "new-key"),
+            &endpoint,
+            &no_events(),
+            &mut online,
+        );
+
+        let stored = layout.lock().unwrap();
+        assert_eq!(stored.paired_controllers.len(), 1, "must not add a second controller");
+        let controller = &stored.paired_controllers[0];
+        assert_eq!(controller.transport_public_key, "new-key");
+        assert_eq!(controller.ip, "192.168.1.9");
+        assert_eq!(controller.id, "peer-desktop-192-168-1-9");
+        drop(stored);
+
+        // ...and the address the diagnostics upload dials is now current.
+        let endpoint = endpoint.lock().unwrap().clone().expect("endpoint published");
+        assert_eq!(endpoint.ip, "192.168.1.9");
+        assert_eq!(endpoint.transport_public_key, "new-key");
+        assert_eq!(online, vec!["peer-desktop-192-168-1-9".to_string()]);
+    }
+
+    /// Regression, found on the real tablet: the desktop app and a second MyKVM
+    /// instance (the live test controller) ran on the same PC, so they shared an
+    /// IP. Matching on the IP alone let the test controller overwrite the stored
+    /// controller -- credentials and all. Only an identity or hostname match may
+    /// rewrite the record.
+    #[test]
+    fn a_second_instance_on_the_same_pc_cannot_take_over_the_record() {
+        let layout = Arc::new(Mutex::new(paired_layout()));
+        let endpoint: SharedControllerEndpoint = Arc::new(Mutex::new(None));
+        let mut online = Vec::new();
+
+        // Same PC, same IP, different name/host/id/key.
+        let mut impostor = desktop_peer("peer-live-controller", "192.168.1.7", "live-key");
+        impostor.name = "Live Test Controller".into();
+        impostor.host = "live-controller-host".into();
+
+        adopt_controller(&layout, &impostor, &endpoint, &no_events(), &mut online);
+
+        let stored = layout.lock().unwrap();
+        let controller = &stored.paired_controllers[0];
+        assert_eq!(controller.transport_public_key, "old-key");
+        assert_eq!(controller.id, "peer-desktop-192-168-1-7");
+        assert_eq!(controller.name, "Desktop");
+        assert!(online.is_empty(), "the impostor must not look like our controller");
+    }
+
+    /// A stranger must not be able to overwrite the record or become the upload
+    /// target just by being on the same LAN.
+    #[test]
+    fn an_unrelated_desktop_is_left_alone() {
+        let layout = Arc::new(Mutex::new(paired_layout()));
+        let endpoint: SharedControllerEndpoint = Arc::new(Mutex::new(None));
+        let mut online = Vec::new();
+
+        let mut stranger = desktop_peer("peer-other-10-0-0-5", "10.0.0.5", "other-key");
+        stranger.name = "Other PC".into();
+        stranger.host = "other-pc".into();
+        // Not our cluster, no matching identity: nothing to adopt.
+        stranger.cluster_id = "cluster-other".into();
+
+        adopt_controller(&layout, &stranger, &endpoint, &no_events(), &mut online);
+
+        let stored = layout.lock().unwrap();
+        assert_eq!(stored.paired_controllers[0].transport_public_key, "old-key");
+        assert_eq!(stored.paired_controllers[0].ip, "192.168.1.7");
+        drop(stored);
+        assert!(endpoint.lock().unwrap().is_none(), "no endpoint for a stranger");
+        assert!(online.is_empty());
     }
 
     #[test]
