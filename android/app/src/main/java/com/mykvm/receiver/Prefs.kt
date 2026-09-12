@@ -57,9 +57,41 @@ class Prefs(context: Context) {
         get() = store.getBoolean(KEY_CLIPBOARD_SYNC, true)
         set(value) = store.edit().putBoolean(KEY_CLIPBOARD_SYNC, value).apply()
 
+    /**
+     * Whether the receiver temporarily moves the tablet's IME out of the input
+     * path.
+     *
+     * OFF by default, and it must stay that way. Turning it on leaves the tablet
+     * with no input method at all, so its own soft keyboard never opens, the
+     * user cannot switch IMEs, and Chinese input is impossible until it is
+     * turned off again. It is also not needed: the injector sends full
+     * `KeyCharacterMap` events, which reach the app through the active IME
+     * (verified on the test tablet with Sogou as the default IME).
+     *
+     * It remains as an escape hatch for ROMs or IMEs that really do swallow
+     * injected keys.
+     */
     var keyboardPassthrough: Boolean
-        get() = store.getBoolean(KEY_KEYBOARD_PASSTHROUGH, true)
-        set(value) = store.edit().putBoolean(KEY_KEYBOARD_PASSTHROUGH, value).apply()
+        get() = store.getBoolean(KEY_KEYBOARD_PASSTHROUGH, false)
+        set(value) {
+            store.edit()
+                .putBoolean(KEY_KEYBOARD_PASSTHROUGH, value)
+                .putBoolean(KEY_KEYBOARD_PASSTHROUGH_MIGRATED, true)
+                .apply()
+        }
+
+    /**
+     * One-time upgrade step: earlier builds defaulted [keyboardPassthrough] to
+     * true, which silently took the tablet's keyboard away. Force it off once so
+     * an existing install is usable again; the user can still opt back in.
+     */
+    fun migrateKeyboardPassthroughDefault() {
+        if (store.getBoolean(KEY_KEYBOARD_PASSTHROUGH_MIGRATED, false)) return
+        store.edit()
+            .putBoolean(KEY_KEYBOARD_PASSTHROUGH, false)
+            .putBoolean(KEY_KEYBOARD_PASSTHROUGH_MIGRATED, true)
+            .apply()
+    }
 
     /**
      * The IME that was active before [keyboardPassthrough] replaced it, kept
@@ -129,6 +161,7 @@ class Prefs(context: Context) {
         const val KEY_INPUT_MODE = "input-mode"
         const val KEY_CURSOR_SIZE_DP = "cursor-size-dp"
         const val KEY_KEYBOARD_PASSTHROUGH = "keyboard-passthrough"
+        const val KEY_KEYBOARD_PASSTHROUGH_MIGRATED = "keyboard-passthrough-migrated"
         const val KEY_CLIPBOARD_SYNC = "clipboard-sync"
         const val KEY_SUPPRESSED_IME = "suppressed-ime"
         const val DEFAULT_CURSOR_SIZE_DP = 28

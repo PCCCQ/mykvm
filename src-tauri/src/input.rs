@@ -3590,6 +3590,12 @@ unsafe extern "system" fn windows_keyboard_proc(code: i32, wparam: usize, lparam
     }
 
     let message = wparam as u32;
+    let is_key_message = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP);
+    let key_code = if is_key_message {
+        Some(unsafe { (*(lparam as *const KBDLLHOOKSTRUCT)).vkCode as u16 })
+    } else {
+        None
+    };
 
     let active = context
         .active
@@ -3597,12 +3603,19 @@ unsafe extern "system" fn windows_keyboard_proc(code: i32, wparam: usize, lparam
         .ok()
         .and_then(|active| active.as_ref().map(|active| active.target.clone()));
     let Some(target) = active else {
+        // "The keyboard does not work" always lands here when the cursor is not
+        // on a remote screen: without an active target there is nothing to
+        // forward to, and the key is silently left to the local machine.
+        if let Some(key_code) = key_code {
+            log_windows_key_drop(
+                key_code,
+                "no remote screen has control (move the cursor onto the device first)",
+            );
+        }
         return unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) };
     };
 
-    if matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN | WM_KEYUP | WM_SYSKEYUP) {
-        let event = unsafe { *(lparam as *const KBDLLHOOKSTRUCT) };
-        let key_code = event.vkCode as u16;
+    if let Some(key_code) = key_code {
         let down = matches!(message, WM_KEYDOWN | WM_SYSKEYDOWN);
         if down && windows_event_matches_screen_switch_hotkey(&context, key_code) {
             log::info!("screen switch hotkey returning to local from keyboard hook");
@@ -3617,8 +3630,10 @@ unsafe extern "system" fn windows_keyboard_proc(code: i32, wparam: usize, lparam
             &context.input_events,
         ) {
             track_forwarded_key(&context.pressed_keys, key_code, down);
+            log_windows_key_forwarded(key_code, down, &target);
             return 1;
         }
+        log_windows_key_drop(key_code, "the QUIC send failed");
     }
 
     unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
@@ -3732,6 +3747,59 @@ fn release_windows_remote_control(context: &WindowsCaptureContext, clear_clipboa
     if clear_clipboard {
         clear_clipboard_target(&context.clipboard_target);
     }
+}
+
+/// Throttled so a stuck keyboard cannot fill the log: one line per window per
+/// distinct reason, which is what a tester needs to see *something* when the
+/// keyboard does not work.
+#[cfg(target_os = "windows")]
+fn log_windows_key_drop(key_code: u16, reason: &str) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static LAST_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
+    let previous = LAST_LOGGED_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(previous) < 5_000 {
+        return;
+    }
+    if LAST_LOGGED_MS
+        .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    log::warn!("keyboard: key vk=0x{key_code:02X} was not forwarded -- {reason}");
+}
+
+/// Logs the first key of a burst so a working keyboard is visible in the log too.
+#[cfg(target_os = "windows")]
+fn log_windows_key_forwarded(key_code: u16, down: bool, target: &InputTarget) {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static LAST_LOGGED_MS: AtomicU64 = AtomicU64::new(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or_default();
+    let previous = LAST_LOGGED_MS.load(Ordering::Relaxed);
+    if now.saturating_sub(previous) < 2_000 {
+        return;
+    }
+    if LAST_LOGGED_MS
+        .compare_exchange(previous, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    log::info!(
+        "keyboard: forwarding vk=0x{key_code:02X} down={down} to {}",
+        target.device_id
+    );
 }
 
 #[cfg(target_os = "windows")]

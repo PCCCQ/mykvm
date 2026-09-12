@@ -19,6 +19,9 @@ class MyKvmApp : Application() {
         // Seed the UI state so the first frame shows the real device name
         // instead of a blank string; the service only fills it in once it runs.
         val prefs = Prefs(this)
+        // Older builds turned keyboard passthrough on by default, which left the
+        // tablet with no input method at all. Undo that once.
+        prefs.migrateKeyboardPassthroughDefault()
         ReceiverState.update {
             it.copy(
                 deviceName = prefs.deviceName,

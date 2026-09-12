@@ -231,6 +231,48 @@ host / ip / 名称）。注意这个判定比"能不能重新配对"更严格：
 `startForegroundService` 进来时，即使接收端没停也必须立刻进入前台，否则系统会抛
 `ForegroundServiceDidNotStartInTimeException`。
 
+### 9. 键盘：默认不要关平板输入法
+
+`键盘直通`（`ImeSuppressor`）会把 `DEFAULT_INPUT_METHOD` 指向一个不存在的组件，
+让平板**完全没有输入法**。它曾经是默认开启的，副作用非常严重：
+
+- 平板上点输入框不弹软键盘，也没法切换输入法、打不了中文；
+- 用户反馈的"键盘还是不能用"多数就是这个状态造成的。
+
+**它也不再是必需的**：注入用的是 `KeyCharacterMap.getEvents()` 生成、
+带真实字符的按键事件，真机上（默认输入法 = 搜狗）电脑端按键可以正常落到应用里；
+中文模式下还会直接进入拼音候选（截图验证 `k`、`l` → 候选"快乐 / 看了 / 考虑"）。
+所以：
+
+- `keyboardPassthrough` 默认 **false**，`Prefs.migrateKeyboardPassthroughDefault()`
+  会在升级后强制关闭一次，避免老安装继续把平板键盘关掉；
+- 只有某些 ROM/输入法确实吞掉注入按键时，才让用户手动打开这一项；
+- `MyKvmApp` 启动时的 `ImeSuppressor.repairIfNeeded()` 仍然保留：上一次运行
+  留下 `mykvm/no-ime` 时会自动把真正的输入法放回去。
+
+排查键盘问题最快的入口是应用内「诊断日志」，键事件会记录成：
+
+```
+key vk=0x4B -> keyCode=39 down=true meta=0x0 injected=true (#3)
+```
+
+`injected=false` 说明 Shizuku 注入被拒；完全没有这一行说明电脑端根本没有转发
+按键（电脑端日志会给出原因，见下一节）。
+
+### 10. 电脑端为什么不转发按键
+
+Windows 的键盘钩子只在**控制权在远端**时才转发：`context.active` 为空时按键
+原样留给本机。所以"鼠标能动、键盘不动"通常是控制权已经回到本机（或者从没过去）。
+电脑端的日志现在会明确写出来：
+
+```
+keyboard: forwarding vk=0x4B down=true to peer-android-...
+keyboard: key vk=0x4B was not forwarded -- no remote screen has control
+```
+
+另外可以用 `alt+→/←/↑/↓`（默认屏幕切换快捷键）直接把控制权切到平板，不需要
+用鼠标划过屏幕边缘。
+
 ## 六、真机验证状态
 
 已在 **Lenovo TB371FC（Android 14 / API 34 / arm64-v8a）** 上完成端到端验证：

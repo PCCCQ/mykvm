@@ -292,9 +292,11 @@ private fun KeyboardCard(
                     )
                     Text(
                         if (state.keyboardPassthrough) {
-                            "已接管平板输入法，键盘直接送入应用"
+                            "已临时关闭平板输入法：电脑按键直接送入应用，" +
+                                "但平板上也没有软键盘、无法打中文"
                         } else {
-                            "平板的输入法会拦截按键（表现为打不出字）"
+                            "平板输入法保持可用：可切换输入法、打中文，" +
+                                "电脑按键同样能输入"
                         },
                         color = Muted,
                         fontSize = 13.sp,
@@ -305,7 +307,8 @@ private fun KeyboardCard(
             if (state.keyboardPassthrough) {
                 Spacer(Modifier.height(10.dp))
                 Text(
-                    "接管期间平板的输入法列表不受影响，随时可以在平板上切回来。" +
+                    "只有在电脑按键被输入法吞掉时才需要打开这一项；平时请保持关闭。" +
+                        "输入法列表不会被动过，随时可以在平板上切回来。" +
                         "若异常退出导致平板没键盘，点下面的按钮即可恢复。",
                     color = Muted,
                     fontSize = 12.sp,

@@ -3,6 +3,7 @@ package com.mykvm.receiver.input
 import android.os.SystemClock
 import android.view.KeyEvent
 import android.view.MotionEvent
+import com.mykvm.receiver.diag.Diag
 import org.json.JSONObject
 
 /**
@@ -190,7 +191,13 @@ class InputDispatcher(
     // -----------------------------------------------------------------------
 
     private fun onKey(vk: Int, down: Boolean) {
-        val keyCode = KeyMap.androidKeyCode(vk) ?: return
+        val keyCode = KeyMap.androidKeyCode(vk)
+        if (keyCode == null) {
+            // The wire carries Windows VK codes; an unmapped one is the first
+            // thing to check when "the keyboard does not work" on a device.
+            Diag.warn("key vk=0x${vk.toString(16).uppercase()} is not mapped; dropped")
+            return
+        }
 
         // Modifiers have to update `metaState` *before* the event is built, so a
         // Shift press already carries META_SHIFT_ON and a Shift release does not.
@@ -199,8 +206,21 @@ class InputDispatcher(
             metaState = if (down) metaState or bit else metaState and bit.inv()
         }
 
-        injector.key(keyCode, down, metaState)
+        val injected = injector.key(keyCode, down, metaState)
+        keyEventsSeen += 1
+        // Typing is low rate, so log the first few keys in full and then only
+        // failures plus a periodic heartbeat: enough to diagnose, not enough to
+        // bury the rest of the log.
+        if (!injected || keyEventsSeen <= KEY_EVENT_LOG_BUDGET || keyEventsSeen % 100 == 0) {
+            Diag.info(
+                "key vk=0x${vk.toString(16).uppercase()} -> keyCode=$keyCode down=$down " +
+                    "meta=0x${metaState.toString(16)} injected=$injected (#$keyEventsSeen)",
+            )
+        }
     }
+
+    /** Counts keys seen this session, for the log budget above. */
+    private var keyEventsSeen = 0
 
     private fun injectSystemKey(keyCode: Int) {
         injector.key(keyCode, down = true, metaState = 0)
@@ -239,5 +259,8 @@ class InputDispatcher(
          * than a tap.
          */
         const val SCROLL_STEP_PX = 80f
+
+        /** How many key events to log in full before switching to a heartbeat. */
+        const val KEY_EVENT_LOG_BUDGET = 40
     }
 }
